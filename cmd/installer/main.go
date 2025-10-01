@@ -1,0 +1,40 @@
+package main
+
+import (
+	"flag"
+	"log"
+
+	"github.com/yourname/k8s-installer/internal/installer"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	var (
+		k8sVersion    = flag.String("k8s-version", "v1.30.0", "Kubernetes version")
+		skipDownload  = flag.Bool("skip-download", false, "Skip downloading binaries")
+		skipVerify    = flag.Bool("skip-verify", false, "Skip verification")
+		verbose       = flag.Bool("verbose", false, "Verbose output")
+	)
+	flag.Parse()
+
+	if *verbose {
+		log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
+	}
+
+	inst, err := installer.New(&installer.Config{
+		K8sVersion:   *k8sVersion,
+		SkipDownload: *skipDownload,
+		SkipVerify:   *skipVerify,
+		Verbose:      *verbose,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create installer: %v", err)
+	}
+
+	if err := inst.Run(); err != nil {
+		log.Fatalf("Installation failed: %v", err)
+	}
+
+	log.Println("🎉 Kubernetes installation completed successfully!")
+}

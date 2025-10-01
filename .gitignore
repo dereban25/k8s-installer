@@ -1,0 +1,35 @@
+# Binaries
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+k8s-installer
+
+# Test binary
+*.test
+
+# Coverage
+*.out
+coverage.html
+
+# Go workspace
+go.work
+
+# Kubernetes directories
+kubebuilder/
+etcd/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Temp
+tmp/

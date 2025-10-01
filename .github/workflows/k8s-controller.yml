@@ -1,0 +1,76 @@
+name: Kubernetes Setup
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  setup-k8s:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+        cache: true
+
+    - name: Install dependencies
+      run: |
+        go mod download
+        go mod verify
+
+    - name: Run tests
+      run: go test -v -race -coverprofile=coverage.out ./...
+
+    - name: Build binary
+      run: |
+        go build -v -o k8s-installer .
+        chmod +x k8s-installer
+
+    - name: Run installer
+      run: |
+        sudo ./k8s-installer
+
+    - name: Verify Kubernetes cluster
+      run: |
+        export PATH=$PATH:./kubebuilder/bin
+        kubectl get nodes
+        kubectl get pods -A
+        kubectl version
+
+    - name: Create test deployment
+      run: |
+        export PATH=$PATH:./kubebuilder/bin
+        kubectl create deployment nginx --image=nginx:latest
+        sleep 10
+        kubectl get deployments
+        kubectl get pods
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-k8s-installer
+
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: k8s-logs
+        path: /var/log/kubernetes/
+        retention-days: 7
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: k8s-installer
+        path: k8s-installer
+        retention-days: 30
