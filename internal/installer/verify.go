@@ -3,7 +3,6 @@ package installer
 import (
 	"fmt"
 	"log"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -49,10 +48,10 @@ func (i *Installer) VerifyInstallation() error {
 
 	for _, check := range checks {
 		log.Printf("  Checking %s...", check.name)
-		
+
 		cmd := exec.Command(kubectlPath, check.args...)
 		output, err := cmd.CombinedOutput()
-		
+
 		if err != nil {
 			log.Printf("Warning: %s check failed: %v", check.name, err)
 			if i.config.Verbose {
