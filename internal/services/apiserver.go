@@ -43,8 +43,7 @@ func (m *Manager) StartAPIServer() error {
 		return nil
 	}
 
-	log.Println("  Waiting for API server to become ready (this may take up to 3 minutes)...")
-	// Wait for API server to be ready
+	log.Println("  Waiting for API server to become ready (may take up to 2 minutes)...")
 	return m.waitForAPIServer()
 }
 
@@ -56,12 +55,11 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
-	maxRetries := 120 // 4 минуты (120 * 2 секунды)
+	maxRetries := 60 // 2 minutes
 	successCount := 0
-	requiredSuccesses := 5 // Требуем 5 успешных проверок подряд для стабильности
+	requiredSuccesses := 3
 
 	for i := 0; i < maxRetries; i++ {
-		// Проверяем по localhost и по hostIP
 		urls := []string{
 			"https://127.0.0.1:6443/livez",
 			"https://127.0.0.1:6443/readyz",
@@ -83,25 +81,20 @@ func (m *Manager) waitForAPIServer() error {
 		if success {
 			successCount++
 			if successCount >= requiredSuccesses {
-				log.Printf("  ✓ API server is ready and stable (verified %d times)", requiredSuccesses)
-				// Даем дополнительное время для полной инициализации всех компонентов
-				log.Println("  Waiting additional 5 seconds for full initialization...")
-				time.Sleep(5 * time.Second)
+				log.Printf("  ✓ API server is ready")
+				time.Sleep(3 * time.Second)
 				return nil
 			}
 		} else {
-			successCount = 0 // Сбрасываем счетчик при неудаче
+			successCount = 0
 		}
 
-		if i%15 == 0 && i > 0 {
-			log.Printf("  Still waiting for API server... (%d/%d attempts, %d/%d consecutive successes)", 
+		if i%10 == 0 && i > 0 {
+			log.Printf("  Still waiting... (%d/%d attempts, %d/%d consecutive successes)",
 				i, maxRetries, successCount, requiredSuccesses)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("API server did not become ready after %d seconds.\n"+
-		"The server may still be starting. Check logs:\n"+
-		"  sudo tail -100 /var/log/kubernetes/apiserver.log\n"+
-		"  sudo tail -100 /var/log/kubernetes/etcd.log", maxRetries*2)
+	return fmt.Errorf("API server did not become ready. Check: tail -100 /var/log/kubernetes/apiserver.log")
 }

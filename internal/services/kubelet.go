@@ -36,18 +36,25 @@ func (m *Manager) StartKubelet() error {
 		return err
 	}
 
-	// Wait for node to be registered
-	time.Sleep(5 * time.Second)
+	// Wait longer for node registration
+	log.Println("  Waiting for node registration...")
+	time.Sleep(15 * time.Second)
 
-	// Label the node
+	// Label the node with retries
 	kubectlPath := filepath.Join(m.baseDir, "bin", "kubectl")
-	labelCmd := exec.Command(kubectlPath, "label", "node", hostname, "node-role.kubernetes.io/master=", "--overwrite")
-	output, err := labelCmd.CombinedOutput()
-	if err != nil {
-		if !strings.Contains(string(output), "already has") {
-			log.Printf("Warning: failed to label node: %v, output: %s", err, output)
+	for retry := 0; retry < 5; retry++ {
+		labelCmd := exec.Command(kubectlPath, "label", "node", hostname, "node-role.kubernetes.io/master=", "--overwrite")
+		output, err := labelCmd.CombinedOutput()
+		if err == nil || strings.Contains(string(output), "already has") {
+			log.Println("  ✓ Node labeled successfully")
+			return nil
+		}
+		if retry < 4 {
+			log.Printf("  Retrying node labeling... (%d/5)", retry+2)
+			time.Sleep(5 * time.Second)
 		}
 	}
 
+	log.Println("  Warning: Failed to label node, but continuing...")
 	return nil
 }

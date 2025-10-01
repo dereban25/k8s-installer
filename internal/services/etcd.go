@@ -26,7 +26,6 @@ func (m *Manager) StartEtcd() error {
 		return err
 	}
 
-	// Wait for etcd to be ready
 	log.Println("  Waiting for etcd to become ready...")
 	return m.waitForEtcd()
 }
@@ -42,7 +41,7 @@ func (m *Manager) waitForEtcd() error {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				log.Printf("  ✓ Etcd is ready")
+				log.Println("  ✓ Etcd is ready")
 				return nil
 			}
 		}
@@ -52,13 +51,16 @@ func (m *Manager) waitForEtcd() error {
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				log.Printf("  ✓ Etcd is ready")
+				log.Println("  ✓ Etcd is ready")
 				return nil
 			}
 		}
 
+		if i%5 == 0 && i > 0 {
+			log.Printf("  Still waiting for etcd... (%d/%d seconds)", i, maxRetries)
+		}
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("etcd did not become ready in time")
+	return fmt.Errorf("etcd did not become ready in time. Check: tail -100 /var/log/kubernetes/etcd.log")
 }
