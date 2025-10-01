@@ -2,14 +2,8 @@ package services
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
-
-	"github.com/dereban25/k8s-installer/internal/utils"
 )
 
 type Manager struct {
