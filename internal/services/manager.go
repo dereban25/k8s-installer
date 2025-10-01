@@ -7,16 +7,18 @@ import (
 )
 
 type Manager struct {
-	baseDir    string
-	kubeletDir string
-	hostIP     string
+	baseDir     string
+	kubeletDir  string
+	hostIP      string
+	skipAPIWait bool
 }
 
-func NewManager(baseDir, kubeletDir, hostIP string) *Manager {
+func NewManager(baseDir, kubeletDir, hostIP string, skipAPIWait bool) *Manager {
 	return &Manager{
-		baseDir:    baseDir,
-		kubeletDir: kubeletDir,
-		hostIP:     hostIP,
+		baseDir:     baseDir,
+		kubeletDir:  kubeletDir,
+		hostIP:      hostIP,
+		skipAPIWait: skipAPIWait,
 	}
 }
 
