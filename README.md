@@ -26,7 +26,7 @@
 ### 1. Клонировать репозиторий
 
 ```bash
-git clone https://github.com/yourname/k8s-installer.git
+git clone https://github.com/dereban25/k8s-installer.git
 cd k8s-installer
 ```
 

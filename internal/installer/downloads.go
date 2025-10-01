@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yourname/k8s-installer/internal/utils"
+	"github.com/dereban25/k8s-installer/internal/utils"
 )
 
 type download struct {

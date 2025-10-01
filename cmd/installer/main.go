@@ -4,7 +4,7 @@ import (
 	"flag"
 	"log"
 
-	"github.com/yourname/k8s-installer/internal/installer"
+	"github.com/dereban25/k8s-installer/internal/installer"
 )
 
 func main() {
