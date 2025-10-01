@@ -3,6 +3,7 @@ package services
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +25,7 @@ func (m *Manager) StartAPIServer() error {
 		"--profiling=false",
 		"--storage-backend=etcd3",
 		"--storage-media-type=application/json",
-		"--v=0",
+		"--v=2",
 		"--cloud-provider=external",
 		"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
 		"--service-account-key-file=/tmp/sa.pub",
@@ -35,29 +36,43 @@ func (m *Manager) StartAPIServer() error {
 		return err
 	}
 
+	log.Println("  Waiting for API server to become ready...")
 	// Wait for API server to be ready
 	return m.waitForAPIServer()
 }
 
 func (m *Manager) waitForAPIServer() error {
 	client := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 
-	maxRetries := 30
+	maxRetries := 60 // Увеличено до 60 попыток (2 минуты)
 	for i := 0; i < maxRetries; i++ {
-		resp, err := client.Get(fmt.Sprintf("https://%s:6443/readyz", m.hostIP))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				return nil
+		// Проверяем по localhost и по hostIP
+		urls := []string{
+			"https://127.0.0.1:6443/readyz",
+			fmt.Sprintf("https://%s:6443/readyz", m.hostIP),
+		}
+
+		for _, url := range urls {
+			resp, err := client.Get(url)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == 200 {
+					log.Printf("  ✓ API server is ready (attempt %d/%d)", i+1, maxRetries)
+					return nil
+				}
 			}
+		}
+
+		if i%5 == 0 && i > 0 {
+			log.Printf("  Still waiting for API server... (%d/%d)", i, maxRetries)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("API server did not become ready in time")
+	return fmt.Errorf("API server did not become ready after %d seconds. Check logs at /var/log/kubernetes/apiserver.log", maxRetries*2)
 }

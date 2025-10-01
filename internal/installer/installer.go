@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dereban25/k8s-installer/internal/services"
-	"github.com/dereban25/k8s-installer/internal/utils"
+	"github.com/yourname/k8s-installer/internal/services"
+	"github.com/yourname/k8s-installer/internal/utils"
 )
 
 const (
@@ -56,23 +56,24 @@ func New(cfg *Config) (*Installer, error) {
 
 func (i *Installer) Run() error {
 	steps := []struct {
-		name string
-		skip bool
-		fn   func() error
+		name     string
+		skip     bool
+		critical bool
+		fn       func() error
 	}{
-		{"Creating directories", false, i.CreateDirectories},
-		{"Downloading binaries", i.config.SkipDownload, i.DownloadBinaries},
-		{"Generating certificates", false, i.GenerateCertificates},
-		{"Creating configurations", false, i.CreateConfigurations},
-		{"Starting etcd", false, i.services.StartEtcd},
-		{"Starting API server", false, i.services.StartAPIServer},
-		{"Starting containerd", false, i.services.StartContainerd},
-		{"Configuring kubectl", false, i.ConfigureKubectl},
-		{"Starting scheduler", false, i.services.StartScheduler},
-		{"Starting kubelet", false, i.services.StartKubelet},
-		{"Starting controller manager", false, i.services.StartControllerManager},
-		{"Creating default resources", false, i.CreateDefaultResources},
-		{"Verifying installation", i.config.SkipVerify, i.VerifyInstallation},
+		{"Creating directories", false, true, i.CreateDirectories},
+		{"Downloading binaries", i.config.SkipDownload, true, i.DownloadBinaries},
+		{"Generating certificates", false, true, i.GenerateCertificates},
+		{"Creating configurations", false, true, i.CreateConfigurations},
+		{"Starting etcd", false, true, i.services.StartEtcd},
+		{"Starting API server", false, true, i.services.StartAPIServer},
+		{"Starting containerd", false, true, i.services.StartContainerd},
+		{"Configuring kubectl", false, true, i.ConfigureKubectl},
+		{"Starting scheduler", false, false, i.services.StartScheduler},
+		{"Starting kubelet", false, false, i.services.StartKubelet},
+		{"Starting controller manager", false, false, i.services.StartControllerManager},
+		{"Creating default resources", false, false, i.CreateDefaultResources},
+		{"Verifying installation", i.config.SkipVerify, false, i.VerifyInstallation},
 	}
 
 	for _, step := range steps {
@@ -83,7 +84,12 @@ func (i *Installer) Run() error {
 
 		log.Printf("=> %s...", step.name)
 		if err := step.fn(); err != nil {
-			return fmt.Errorf("failed at step '%s': %w", step.name, err)
+			if step.critical {
+				log.Printf("✗ CRITICAL: %s failed", step.name)
+				return fmt.Errorf("failed at step '%s': %w\n\nCheck logs at /var/log/kubernetes/", step.name, err)
+			}
+			log.Printf("⚠ Warning: %s failed (non-critical): %v", step.name, err)
+			continue
 		}
 		log.Printf("✓ %s completed", step.name)
 	}

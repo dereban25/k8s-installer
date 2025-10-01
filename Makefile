@@ -68,6 +68,30 @@ clean-logs: ## Clean only log files
 	@echo "Cleaning log files..."
 	sudo rm -rf /var/log/kubernetes/*
 
+logs: ## View all Kubernetes logs
+	@echo "Viewing Kubernetes logs..."
+	@echo "=== ETCD ==="
+	@sudo tail -20 /var/log/kubernetes/etcd.log 2>/dev/null || echo "No etcd logs"
+	@echo ""
+	@echo "=== API SERVER ==="
+	@sudo tail -20 /var/log/kubernetes/apiserver.log 2>/dev/null || echo "No apiserver logs"
+	@echo ""
+	@echo "=== SCHEDULER ==="
+	@sudo tail -20 /var/log/kubernetes/scheduler.log 2>/dev/null || echo "No scheduler logs"
+
+logs-apiserver: ## View API server logs
+	@sudo tail -f /var/log/kubernetes/apiserver.log
+
+logs-etcd: ## View etcd logs
+	@sudo tail -f /var/log/kubernetes/etcd.log
+
+logs-all: ## View all logs in real-time
+	@sudo tail -f /var/log/kubernetes/*.log
+
+diagnose: ## Run diagnostics
+	@chmod +x scripts/diagnose.sh
+	@sudo ./scripts/diagnose.sh
+
 deps: ## Download dependencies
 	@echo "Downloading dependencies..."
 	$(GO) mod download
