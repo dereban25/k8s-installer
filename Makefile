@@ -30,6 +30,14 @@ run-verbose: build ## Build and run with verbose output
 	@echo "Running $(BINARY_NAME) with verbose output..."
 	sudo $(BUILD_DIR)/$(BINARY_NAME) -verbose
 
+run-fast: build ## Build and run with fast mode (skip API wait)
+	@echo "Running $(BINARY_NAME) in fast mode..."
+	sudo $(BUILD_DIR)/$(BINARY_NAME) -skip-api-wait
+
+run-force: build ## Build and run with continue on error
+	@echo "Running $(BINARY_NAME) with force mode..."
+	sudo $(BUILD_DIR)/$(BINARY_NAME) -continue-on-error
+
 test: ## Run tests
 	@echo "Running tests..."
 	$(GO) test -v -race -coverprofile=coverage.out ./...

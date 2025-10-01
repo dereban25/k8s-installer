@@ -36,43 +36,64 @@ func (m *Manager) StartAPIServer() error {
 		return err
 	}
 
-	log.Println("  Waiting for API server to become ready...")
+	log.Println("  Waiting for API server to become ready (this may take up to 3 minutes)...")
 	// Wait for API server to be ready
 	return m.waitForAPIServer()
 }
 
 func (m *Manager) waitForAPIServer() error {
 	client := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 
-	maxRetries := 60 // Увеличено до 60 попыток (2 минуты)
+	maxRetries := 90 // 3 минуты (90 * 2 секунды)
+	successCount := 0
+	requiredSuccesses := 3 // Требуем 3 успешных проверки подряд
+
 	for i := 0; i < maxRetries; i++ {
 		// Проверяем по localhost и по hostIP
 		urls := []string{
+			"https://127.0.0.1:6443/livez",
 			"https://127.0.0.1:6443/readyz",
-			fmt.Sprintf("https://%s:6443/readyz", m.hostIP),
+			fmt.Sprintf("https://%s:6443/livez", m.hostIP),
 		}
 
+		success := false
 		for _, url := range urls {
 			resp, err := client.Get(url)
 			if err == nil {
 				resp.Body.Close()
 				if resp.StatusCode == 200 {
-					log.Printf("  ✓ API server is ready (attempt %d/%d)", i+1, maxRetries)
-					return nil
+					success = true
+					break
 				}
 			}
 		}
 
-		if i%5 == 0 && i > 0 {
-			log.Printf("  Still waiting for API server... (%d/%d)", i, maxRetries)
+		if success {
+			successCount++
+			if successCount >= requiredSuccesses {
+				log.Printf("  ✓ API server is ready and stable (attempt %d/%d)", i+1, maxRetries)
+				// Даем дополнительное время для инициализации namespace
+				time.Sleep(3 * time.Second)
+				return nil
+			}
+		} else {
+			successCount = 0 // Сбрасываем счетчик при неудаче
+		}
+
+		if i%10 == 0 && i > 0 {
+			log.Printf("  Still waiting for API server... (%d/%d attempts, %d consecutive successes)", 
+				i, maxRetries, successCount)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("API server did not become ready after %d seconds. Check logs at /var/log/kubernetes/apiserver.log", maxRetries*2)
+	return fmt.Errorf("API server did not become ready after %d seconds.\n"+
+		"The server may still be starting. Check logs:\n"+
+		"  sudo tail -100 /var/log/kubernetes/apiserver.log\n"+
+		"  sudo tail -100 /var/log/kubernetes/etcd.log", maxRetries*2)
 }
