@@ -36,6 +36,13 @@ func (m *Manager) StartAPIServer() error {
 		return err
 	}
 
+	if m.skipAPIWait {
+		log.Println("  ⚠️  Skipping API server readiness check (--skip-api-wait enabled)")
+		log.Println("  Giving API server 15 seconds to start...")
+		time.Sleep(15 * time.Second)
+		return nil
+	}
+
 	log.Println("  Waiting for API server to become ready (this may take up to 3 minutes)...")
 	// Wait for API server to be ready
 	return m.waitForAPIServer()
@@ -49,9 +56,9 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
-	maxRetries := 90 // 3 минуты (90 * 2 секунды)
+	maxRetries := 120 // 4 минуты (120 * 2 секунды)
 	successCount := 0
-	requiredSuccesses := 3 // Требуем 3 успешных проверки подряд
+	requiredSuccesses := 5 // Требуем 5 успешных проверок подряд для стабильности
 
 	for i := 0; i < maxRetries; i++ {
 		// Проверяем по localhost и по hostIP
@@ -76,18 +83,19 @@ func (m *Manager) waitForAPIServer() error {
 		if success {
 			successCount++
 			if successCount >= requiredSuccesses {
-				log.Printf("  ✓ API server is ready and stable (attempt %d/%d)", i+1, maxRetries)
-				// Даем дополнительное время для инициализации namespace
-				time.Sleep(3 * time.Second)
+				log.Printf("  ✓ API server is ready and stable (verified %d times)", requiredSuccesses)
+				// Даем дополнительное время для полной инициализации всех компонентов
+				log.Println("  Waiting additional 5 seconds for full initialization...")
+				time.Sleep(5 * time.Second)
 				return nil
 			}
 		} else {
 			successCount = 0 // Сбрасываем счетчик при неудаче
 		}
 
-		if i%10 == 0 && i > 0 {
-			log.Printf("  Still waiting for API server... (%d/%d attempts, %d consecutive successes)", 
-				i, maxRetries, successCount)
+		if i%15 == 0 && i > 0 {
+			log.Printf("  Still waiting for API server... (%d/%d attempts, %d/%d consecutive successes)", 
+				i, maxRetries, successCount, requiredSuccesses)
 		}
 		time.Sleep(2 * time.Second)
 	}
