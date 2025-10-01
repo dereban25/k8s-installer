@@ -21,7 +21,7 @@ func (m *Manager) StartContainerd() error {
 }
 
 func (m *Manager) waitForContainerd() error {
-	maxRetries := 60
+	maxRetries := 210
 	for i := 0; i < maxRetries; i++ {
 		// Check if containerd socket exists
 		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
