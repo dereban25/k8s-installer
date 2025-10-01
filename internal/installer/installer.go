@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/dereban25/k8s-installer/internal/services"
-	"github.com/dereban25/k8s-installer/internal/utils"
+	"github.com/yourname/k8s-installer/internal/services"
+	"github.com/yourname/k8s-installer/internal/utils"
 )
 
 const (
@@ -16,10 +16,12 @@ const (
 )
 
 type Config struct {
-	K8sVersion   string
-	SkipDownload bool
-	SkipVerify   bool
-	Verbose      bool
+	K8sVersion      string
+	SkipDownload    bool
+	SkipVerify      bool
+	SkipAPIWait     bool
+	ContinueOnError bool
+	Verbose         bool
 }
 
 type Installer struct {
@@ -49,7 +51,7 @@ func New(cfg *Config) (*Installer, error) {
 		hostIP:       hostIP,
 	}
 
-	inst.services = services.NewManager(inst.baseDir, inst.kubeletDir, inst.hostIP)
+	inst.services = services.NewManager(inst.baseDir, inst.kubeletDir, inst.hostIP, inst.config.SkipAPIWait)
 
 	return inst, nil
 }
@@ -67,6 +69,7 @@ func (i *Installer) Run() error {
 		{"Creating configurations", false, true, i.CreateConfigurations},
 		{"Starting etcd", false, true, i.services.StartEtcd},
 		{"Starting API server", false, true, i.services.StartAPIServer},
+		{"Creating system namespaces", false, false, i.services.CreateSystemNamespaces},
 		{"Starting containerd", false, true, i.services.StartContainerd},
 		{"Configuring kubectl", false, true, i.ConfigureKubectl},
 		{"Starting scheduler", false, false, i.services.StartScheduler},

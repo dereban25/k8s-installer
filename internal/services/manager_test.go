@@ -32,3 +32,20 @@ func TestNewManager(t *testing.T) {
 		t.Errorf("Expected skipAPIWait to be %v, got %v", skipAPIWait, mgr.skipAPIWait)
 	}
 }
+
+func TestNewManagerWithSkipAPIWait(t *testing.T) {
+	baseDir := "./kubebuilder"
+	kubeletDir := "/var/lib/kubelet"
+	hostIP := "192.168.1.1"
+	skipAPIWait := true
+
+	mgr := NewManager(baseDir, kubeletDir, hostIP, skipAPIWait)
+
+	if mgr == nil {
+		t.Fatal("Manager is nil")
+	}
+
+	if !mgr.skipAPIWait {
+		t.Errorf("Expected skipAPIWait to be true, got false")
+	}
+}
