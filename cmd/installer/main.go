@@ -8,45 +8,37 @@ import (
 )
 
 func main() {
-	skipAPIWait := flag.Bool("skip-api-wait", false, "Skip waiting for API server to be ready")
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	var (
+		k8sVersion       = flag.String("k8s-version", "v1.30.0", "Kubernetes version")
+		skipDownload     = flag.Bool("skip-download", false, "Skip downloading binaries")
+		skipVerify       = flag.Bool("skip-verify", false, "Skip verification")
+		skipAPIWait      = flag.Bool("skip-api-wait", false, "Skip waiting for API server (faster but less safe)")
+		continueOnError  = flag.Bool("continue-on-error", false, "Continue installation even if non-critical steps fail")
+		verbose          = flag.Bool("verbose", false, "Verbose output")
+	)
 	flag.Parse()
 
-	log.SetFlags(log.LstdFlags)
+	if *verbose {
+		log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
+	}
 
-	inst, err := installer.NewInstaller(*skipAPIWait)
+	inst, err := installer.New(&installer.Config{
+		K8sVersion:      *k8sVersion,
+		SkipDownload:    *skipDownload,
+		SkipVerify:      *skipVerify,
+		SkipAPIWait:     *skipAPIWait,
+		ContinueOnError: *continueOnError,
+		Verbose:         *verbose,
+	})
 	if err != nil {
 		log.Fatalf("Failed to create installer: %v", err)
 	}
 
-	steps := []struct {
-		name string
-		fn   func() error
-	}{
-		{"Creating directories", inst.CreateDirectories},
-		{"Downloading binaries", inst.DownloadBinaries},
-		{"Generating certificates", inst.GenerateCertificates},
-		{"Creating configurations", inst.CreateConfigurations},
-		{"Starting containerd", inst.StartContainerd},
-		{"Starting etcd", inst.StartEtcd},
-		{"Starting API server", inst.StartAPIServer},
-		{"Configuring kubectl", inst.ConfigureKubectl},
-		{"Creating system namespaces", inst.CreateSystemNamespaces},
-		{"Starting controller manager", inst.StartControllerManager},
-		{"Starting scheduler", inst.StartScheduler},
-		{"Starting kubelet", inst.StartKubelet},
-		{"Verifying installation", inst.VerifyInstallation},
-	}
-
-	for _, step := range steps {
-		log.Printf("=> %s...", step.name)
-		if err := step.fn(); err != nil {
-			log.Fatalf("Failed at step '%s': %v", step.name, err)
-		}
-		log.Printf("✓ %s completed", step.name)
+	if err := inst.Run(); err != nil {
+		log.Fatalf("Installation failed: %v", err)
 	}
 
 	log.Println("🎉 Kubernetes installation completed successfully!")
-	log.Println("You can now use kubectl to interact with your cluster:")
-	log.Println("  kubectl get nodes")
-	log.Println("  kubectl get pods -A")
 }
