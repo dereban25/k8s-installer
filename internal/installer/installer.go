@@ -83,6 +83,7 @@ func (i *Installer) Run() error {
 		{"Downloading binaries", i.DownloadBinaries},
 		{"Generating certificates", i.GenerateCertificates},
 		{"Creating configurations", i.CreateConfigurations},
+		{"Configure kubectl", i.ConfigureKubectl}, // 🔑 добавили сюда
 		{"Starting etcd", i.services.StartEtcd},
 		{"Starting API server", i.services.StartAPIServer},
 		{"Starting containerd", i.services.StartContainerd},

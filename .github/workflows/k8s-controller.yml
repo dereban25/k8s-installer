@@ -44,6 +44,7 @@ jobs:
     - name: Verify Kubernetes cluster
       run: |
         export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config   # 🔑 используем kubeconfig
         kubectl get nodes || echo "Nodes check failed"
         kubectl get pods -A || echo "Pods check failed"
         kubectl version --client || echo "Version check failed"
@@ -51,6 +52,7 @@ jobs:
     - name: Create test deployment
       run: |
         export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config   # 🔑 используем kubeconfig
         kubectl create deployment nginx --image=nginx:latest || echo "Deployment creation failed"
         sleep 15
         kubectl get deployments || echo "Deployments check failed"
