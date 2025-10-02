@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath" 
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -15,7 +15,8 @@ func (m *Manager) StartContainerd() error {
 		filepath.Join(m.baseDir, "bin", "containerd"),
 		"-c", "/etc/containerd/config.toml",
 	)
-	// добавляем PATH, чтобы точно находились crictl/ctr
+
+	// расширяем PATH, чтобы точно находились crictl/ctr
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH")+":"+filepath.Join(m.baseDir, "bin")+":/usr/local/bin:/usr/sbin",
 	)
@@ -37,30 +38,34 @@ func (m *Manager) waitForContainerd() error {
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		// Проверяем процесс
+		// проверяем процесс
 		if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err != nil && i%5 == 0 {
 			log.Println("  ⚠ containerd process not found yet")
 		}
 
-		// Проверяем сокет
+		// проверяем сокет
 		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
-			// crictl
+			// 1. пробуем crictl
 			if _, err := exec.LookPath("crictl"); err == nil {
-				if exec.Command("crictl", "--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version").Run() == nil {
+				if exec.Command("crictl",
+					"--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version",
+				).Run() == nil {
 					log.Println("  ✓ Containerd is ready (crictl)")
 					time.Sleep(2 * time.Second)
 					return nil
 				}
 			}
-			// ctr
+			// 2. fallback ctr
 			if _, err := exec.LookPath("ctr"); err == nil {
-				if exec.Command("ctr", "--address", "/run/containerd/containerd.sock", "version").Run() == nil {
+				if exec.Command("ctr",
+					"--address", "/run/containerd/containerd.sock", "version",
+				).Run() == nil {
 					log.Println("  ✓ Containerd is ready (ctr)")
 					time.Sleep(2 * time.Second)
 					return nil
 				}
 			}
-			// fallback: если сокет есть и процесс жив — ок
+			// 3. fallback по факту процесса + сокета
 			if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err == nil && i > 5 {
 				log.Println("  ⚠ No crictl/ctr; socket present and process running — proceeding")
 				return nil

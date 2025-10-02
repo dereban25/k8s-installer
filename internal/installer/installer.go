@@ -19,10 +19,10 @@ const (
 )
 
 type Installer struct {
-	config   *Config
-	baseDir  string
+	config     *Config
+	baseDir    string
 	kubeletDir string
-	services *services.Manager
+	services   *services.Manager
 }
 
 type Config struct {
