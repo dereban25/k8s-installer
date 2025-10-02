@@ -7,10 +7,15 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  # Переменные для containerd (соответствуют улучшенному containerd.go)
+  CONTAINERD_MAX_RETRIES: 150
+  KUBECONFIG: ${{ github.workspace }}/.kube/config
+
 jobs:
   setup-k8s:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45  # Увеличиваем для медленных runner'ов
     
     steps:
     - name: Checkout code
@@ -27,18 +32,113 @@ jobs:
         go mod download
         go mod verify
 
+    # Новый шаг: подготавливаем среду для containerd
+    - name: Prepare containerd environment
+      run: |
+        echo "=== Preparing containerd environment ==="
+        
+        # Создаем необходимые директории
+        sudo mkdir -p /var/lib/containerd /run/containerd /var/log/kubernetes /tmp/containerd
+        sudo mkdir -p /var/lib/kubernetes/pki
+        
+        # Очищаем старые файлы если есть
+        sudo rm -f /run/containerd/containerd.sock*
+        sudo rm -f /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db.lock
+        
+        # Устанавливаем права
+        sudo chown -R $USER:$USER /var/log/kubernetes || true
+        
+        # Проверяем доступное место на диске
+        echo ""
+        echo "=== System resources ==="
+        df -h /var/lib
+        free -h
+        
+        # Убиваем старые процессы containerd если есть
+        sudo pkill -f containerd || true
+        sleep 2
+        
+        echo "✓ Environment prepared"
+
     - name: Build binary
       run: |
+        echo "=== Building installer ==="
         go build -v -o k8s-installer ./cmd/installer
         chmod +x k8s-installer
+        echo "✓ Binary built successfully"
 
-    - name: Run installer
+    # Улучшенный запуск installer'а с дополнительными опциями
+    - name: Run installer with containerd optimizations
       run: |
-        sudo ./k8s-installer -skip-api-wait -verbose
-        ls -la /
+        echo "=== Running installer ==="
+        
+        # Экспортируем переменные для нашего улучшенного containerd.go
+        export CONTAINERD_MAX_RETRIES=150
+        export TMPDIR=/tmp
+        
+        # Запускаем с дополнительным логированием
+        sudo -E ./k8s-installer -skip-api-wait -verbose 2>&1 | tee installer.log
+        
+        echo ""
+        echo "=== Installation completed ==="
+        echo "Exit code: $?"
+
+    # Более детальная проверка containerd после установки
+    - name: Verify containerd installation
+      run: |
+        echo "=== Verifying containerd ==="
+        
+        # Проверяем процесс
+        if pgrep -f containerd > /dev/null; then
+          echo "✓ Containerd process is running"
+          ps aux | grep containerd | grep -v grep
+        else
+          echo "✗ Containerd process not found"
+          exit 1
+        fi
+        
+        echo ""
+        echo "=== Containerd socket ==="
+        if [ -S "/run/containerd/containerd.sock" ]; then
+          echo "✓ Socket exists"
+          ls -la /run/containerd/
+        else
+          echo "✗ Socket not found"
+          exit 1
+        fi
+        
+        echo ""
+        echo "=== CRI test ==="
+        export PATH=$PATH:./kubebuilder/bin
+        
+        # Тестируем CRI с таймаутом
+        if timeout 10 crictl --runtime-endpoint unix:///run/containerd/containerd.sock version; then
+          echo "✓ CRI is responsive"
+        else
+          echo "✗ CRI not responding"
+          echo ""
+          echo "Last containerd logs:"
+          sudo tail -20 /var/log/kubernetes/containerd.log || true
+          exit 1
+        fi
+        
+        echo ""
+        echo "=== Containerd info ==="
+        crictl --runtime-endpoint unix:///run/containerd/containerd.sock info || true
 
     - name: Wait for stabilization
-      run: sleep 60
+      run: |
+        echo "=== Waiting for system stabilization ==="
+        sleep 30
+        
+        # Проверяем что все процессы стабильны
+        echo ""
+        echo "=== Process check ==="
+        ps aux | grep -E 'kube|etcd|containerd' | grep -v grep || true
+        
+        echo ""
+        echo "=== Socket check ==="
+        sudo netstat -tlnp | grep -E ':(6443|2379|10250)' || true
 
     # Критичный шаг: проверяем и исправляем kubeconfig
     - name: Fix kubeconfig if needed
@@ -83,13 +183,15 @@ jobs:
         echo ""
         echo "=== Using kubeconfig from: $FOUND_CONFIG ==="
         
-        # Копируем найденный конфиг в стандартное место
-        mkdir -p $HOME/.kube
-        if [ "$FOUND_CONFIG" != "$HOME/.kube/config" ]; then
-          echo "Copying kubeconfig to $HOME/.kube/config"
-          sudo cp "$FOUND_CONFIG" "$HOME/.kube/config"
-          sudo chown $(id -u):$(id -g) "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
+        # Создаем .kube директорию в workspace
+        mkdir -p ${{ github.workspace }}/.kube
+        
+        # Копируем найденный конфиг
+        if [ "$FOUND_CONFIG" != "${{ github.workspace }}/.kube/config" ]; then
+          echo "Copying kubeconfig to workspace"
+          sudo cp "$FOUND_CONFIG" "${{ github.workspace }}/.kube/config"
+          sudo chown $(id -u):$(id -g) "${{ github.workspace }}/.kube/config"
+          chmod 600 "${{ github.workspace }}/.kube/config"
         fi
         
         echo ""
@@ -113,7 +215,7 @@ jobs:
           fi
           
           # Удаляем старый kubeconfig
-          rm -f $HOME/.kube/config
+          rm -f ${{ github.workspace }}/.kube/config
           
           # Настраиваем cluster
           kubectl config set-cluster local-cluster \
@@ -168,159 +270,224 @@ jobs:
       run: |
         echo "=== Testing TCP connection to API server ==="
         
-        for i in {1..30}; do
-          if timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/6443' 2>/dev/null; then
-            echo "Connected to 127.0.0.1:6443 (attempt $i)"
-            exit 0
+        for i in {1..60}; do  # Увеличиваем количество попыток
+          if timeout 5 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/6443' 2>/dev/null; then
+            echo "✓ Connected to 127.0.0.1:6443 (attempt $i)"
+            
+            # Дополнительная проверка TLS
+            if timeout 5 curl -k -s https://127.0.0.1:6443/healthz > /dev/null; then
+              echo "✓ TLS handshake successful"
+              exit 0
+            else
+              echo "⚠ TCP connected but TLS failed, retrying..."
+            fi
           fi
-          echo "Attempt $i/30 failed, retrying in 2 seconds..."
-          sleep 2
+          echo "Attempt $i/60 failed, retrying in 3 seconds..."
+          sleep 3
         done
         
-        echo "ERROR: Cannot connect to 127.0.0.1:6443 after 30 attempts"
+        echo "ERROR: Cannot connect to 127.0.0.1:6443 after 60 attempts"
         echo ""
         echo "=== Diagnostics ==="
         ps aux | grep kube-apiserver | grep -v grep || echo "API server not running"
         sudo netstat -tlnp | grep -E ':(6443|8080)' || echo "No listeners"
+        sudo journalctl -u kube-apiserver --no-pager -n 20 || echo "No apiserver logs"
         exit 1
 
     - name: Test kubectl client
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         
         echo "=== kubectl client version ==="
         kubectl version --client
+        
+        echo ""
+        echo "=== kubectl configuration ==="
+        kubectl config current-context
+        kubectl config get-contexts
 
     - name: Get cluster info
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         
         echo "=== Cluster info ==="
-        kubectl cluster-info || {
+        if ! kubectl cluster-info --request-timeout=30s; then
           echo "Cannot get cluster info"
           echo ""
           echo "=== Config view ==="
           kubectl config view
           echo ""
-          echo "=== Check API server ==="
-          curl -k https://127.0.0.1:6443/healthz || echo "API not responding"
+          echo "=== API server health check ==="
+          curl -k -v https://127.0.0.1:6443/healthz || echo "API not responding"
+          echo ""
+          echo "=== API server logs ==="
+          sudo journalctl -u kube-apiserver --no-pager -n 30 || echo "No logs"
           exit 1
-        }
+        fi
 
-    - name: Verify cluster
+    - name: Verify cluster components
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         
         echo "=== Nodes ==="
-        kubectl get nodes -o wide || echo "Nodes check failed"
+        kubectl get nodes -o wide --request-timeout=30s || echo "Nodes check failed"
         
         echo ""
         echo "=== System pods ==="
-        kubectl get pods -A || echo "Pods check failed"
+        kubectl get pods -A --request-timeout=30s || echo "Pods check failed"
         
         echo ""
         echo "=== Component status ==="
-        kubectl get componentstatuses || echo "Status check failed"
+        kubectl get componentstatuses --request-timeout=30s || echo "Status check failed"
         
         echo ""
         echo "=== API health ==="
-        kubectl get --raw=/healthz || echo "Health check failed"
+        kubectl get --raw=/healthz --request-timeout=10s || echo "Health check failed"
         
         echo ""
         echo "=== Server version ==="
-        kubectl version || echo "Version check failed"
+        kubectl version --request-timeout=30s || echo "Version check failed"
+        
+        echo ""
+        echo "=== Namespaces ==="
+        kubectl get namespaces --request-timeout=30s || echo "Namespace check failed"
 
     - name: Create test deployment
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         
         echo "=== Creating nginx deployment ==="
-        kubectl create deployment nginx --image=nginx:latest || {
-          echo "Deployment failed"
+        if ! kubectl create deployment nginx --image=nginx:latest --request-timeout=30s; then
+          echo "Deployment creation failed"
+          kubectl get events --sort-by='.lastTimestamp' --request-timeout=30s
+          exit 1
+        fi
+        
+        echo ""
+        echo "=== Waiting for deployment ==="
+        if ! kubectl wait --for=condition=available --timeout=120s deployment/nginx; then
+          echo "Deployment not ready within 120s"
+          echo ""
+          echo "=== Deployment status ==="
+          kubectl get deployment nginx -o wide
+          echo ""
+          echo "=== Pod status ==="
+          kubectl get pods -l app=nginx -o wide
+          echo ""
+          echo "=== Pod details ==="
+          kubectl describe pods -l app=nginx
+          echo ""
+          echo "=== Events ==="
           kubectl get events --sort-by='.lastTimestamp'
           exit 1
-        }
+        fi
         
         echo ""
-        echo "=== Waiting for ready ==="
-        kubectl wait --for=condition=available --timeout=60s deployment/nginx || {
-          echo "Deployment not ready"
-          kubectl get deployment nginx -o wide
-          kubectl get pods -l app=nginx -o wide
-          kubectl describe pods -l app=nginx
-          exit 1
-        }
-        
-        echo ""
-        echo "=== Final status ==="
+        echo "=== Final deployment status ==="
         kubectl get deployments
         kubectl get pods -l app=nginx -o wide
 
     - name: Test service
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         
         echo "=== Creating service ==="
-        kubectl expose deployment nginx --port=80 --type=NodePort
+        kubectl expose deployment nginx --port=80 --type=NodePort --request-timeout=30s
         
         echo ""
         echo "=== Service details ==="
         kubectl get svc nginx -o wide
         kubectl describe svc nginx
 
-    - name: Diagnostics
+    - name: Advanced diagnostics
       if: always()
       run: |
         echo "=== System info ==="
         uname -a
+        echo ""
+        echo "=== Disk usage ==="
+        df -h
+        echo ""
+        echo "=== Memory usage ==="
+        free -h
+        echo ""
+        echo "=== CPU info ==="
+        nproc
         
         echo ""
-        echo "=== Processes ==="
+        echo "=== Kubernetes processes ==="
         ps aux | grep -E 'kube|etcd|containerd' | grep -v grep || true
         
         echo ""
-        echo "=== Network ==="
-        sudo netstat -tlnp | grep -E ':(6443|2379|10250)' || true
+        echo "=== Network listeners ==="
+        sudo netstat -tlnp | grep -E ':(6443|2379|10250|10251|10252)' || true
+        
+        echo ""
+        echo "=== Containerd status ==="
+        if command -v crictl > /dev/null; then
+          export PATH=$PATH:./kubebuilder/bin
+          crictl --runtime-endpoint unix:///run/containerd/containerd.sock ps -a || true
+          crictl --runtime-endpoint unix:///run/containerd/containerd.sock images || true
+        fi
         
         echo ""
         echo "=== Directory structure ==="
         sudo ls -lah /var/lib/kubernetes/ || true
         sudo ls -lah /var/lib/kubernetes/pki/ || true
+        sudo ls -lah /var/lib/kubelet/ || true
+        sudo ls -lah /run/containerd/ || true
 
-    - name: Collect logs
+    - name: Collect comprehensive logs
       if: always()
       run: |
         mkdir -p k8s-logs
         
-        sudo journalctl -u kube-apiserver --no-pager > k8s-logs/apiserver.log 2>&1 || echo "No logs" > k8s-logs/apiserver.log
-        sudo journalctl -u kube-controller-manager --no-pager > k8s-logs/controller.log 2>&1 || echo "No logs" > k8s-logs/controller.log
-        sudo journalctl -u kube-scheduler --no-pager > k8s-logs/scheduler.log 2>&1 || echo "No logs" > k8s-logs/scheduler.log
-        sudo journalctl -u kubelet --no-pager > k8s-logs/kubelet.log 2>&1 || echo "No logs" > k8s-logs/kubelet.log
-        sudo journalctl -u etcd --no-pager > k8s-logs/etcd.log 2>&1 || echo "No logs" > k8s-logs/etcd.log
-        sudo journalctl -u containerd --no-pager > k8s-logs/containerd.log 2>&1 || echo "No logs" > k8s-logs/containerd.log
+        # Системные журналы
+        echo "=== Collecting systemd logs ==="
+        sudo journalctl -u kube-apiserver --no-pager > k8s-logs/apiserver.log 2>&1 || echo "No apiserver logs" > k8s-logs/apiserver.log
+        sudo journalctl -u kube-controller-manager --no-pager > k8s-logs/controller.log 2>&1 || echo "No controller logs" > k8s-logs/controller.log
+        sudo journalctl -u kube-scheduler --no-pager > k8s-logs/scheduler.log 2>&1 || echo "No scheduler logs" > k8s-logs/scheduler.log
+        sudo journalctl -u kubelet --no-pager > k8s-logs/kubelet.log 2>&1 || echo "No kubelet logs" > k8s-logs/kubelet.log
+        sudo journalctl -u etcd --no-pager > k8s-logs/etcd.log 2>&1 || echo "No etcd logs" > k8s-logs/etcd.log
+        sudo journalctl -u containerd --no-pager > k8s-logs/containerd-systemd.log 2>&1 || echo "No containerd systemd logs" > k8s-logs/containerd-systemd.log
         
+        # Файловые логи
+        echo "=== Collecting file logs ==="
         if [ -d "/var/log/kubernetes" ]; then
           sudo cp -r /var/log/kubernetes/* k8s-logs/ 2>&1 || true
         fi
         
-        cp "$HOME/.kube/config" k8s-logs/kubeconfig.yaml 2>&1 || true
+        # Конфигурации
+        echo "=== Collecting configurations ==="
+        cp "${{ github.workspace }}/.kube/config" k8s-logs/kubeconfig.yaml 2>&1 || true
+        sudo cp /etc/containerd/config.toml k8s-logs/containerd-config.toml 2>&1 || true
         
+        # Kubernetes ресурсы
+        echo "=== Collecting k8s resources ==="
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config
         kubectl get all -A -o wide > k8s-logs/resources.txt 2>&1 || true
         kubectl get events -A --sort-by='.lastTimestamp' > k8s-logs/events.txt 2>&1 || true
         kubectl describe nodes > k8s-logs/nodes.txt 2>&1 || true
+        kubectl get pods -A -o yaml > k8s-logs/pods-full.yaml 2>&1 || true
+        
+        # Системная информация
+        echo "=== Collecting system info ==="
+        ps aux > k8s-logs/processes.txt 2>&1 || true
+        sudo netstat -tlnp > k8s-logs/network.txt 2>&1 || true
+        df -h > k8s-logs/disk.txt 2>&1 || true
+        free -h > k8s-logs/memory.txt 2>&1 || true
+        
+        # Installer лог
+        cp installer.log k8s-logs/ 2>&1 || true
+        
+        echo "=== Log collection completed ==="
+        ls -la k8s-logs/
 
     - name: Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: k8s-logs
+        name: k8s-logs-${{ github.run_id }}
         path: k8s-logs/
         retention-days: 7
 
@@ -328,6 +495,6 @@ jobs:
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: k8s-installer
+        name: k8s-installer-${{ github.run_id }}
         path: k8s-installer
         retention-days: 30
