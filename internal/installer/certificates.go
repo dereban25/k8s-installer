@@ -7,111 +7,240 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
 )
 
+// GenerateCertificates генерирует все необходимые сертификаты
 func (i *Installer) GenerateCertificates() error {
-	if err := i.generateCA(); err != nil {
+	pkiDir := filepath.Join(i.baseDir, "pki")
+	
+	// Проверяем, что директория существует
+	if _, err := os.Stat(pkiDir); os.IsNotExist(err) {
+		return fmt.Errorf("PKI directory does not exist: %s (run CreateDirectories first)", pkiDir)
+	}
+
+	// 1. Генерируем CA
+	log.Println("  Generating CA certificate...")
+	caKey, caCert, err := i.generateCA()
+	if err != nil {
 		return fmt.Errorf("failed to generate CA: %w", err)
 	}
 
-	if err := i.generateServiceAccountKeys(); err != nil {
-		return fmt.Errorf("failed to generate service account keys: %w", err)
+	// Сохраняем CA
+	if err := i.saveCertificate(filepath.Join(pkiDir, "ca.crt"), caCert); err != nil {
+		return err
+	}
+	if err := i.savePrivateKey(filepath.Join(pkiDir, "ca.key"), caKey); err != nil {
+		return err
 	}
 
-	if err := i.createTokenFile(); err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
+	// 2. Генерируем admin сертификат
+	log.Println("  Generating admin certificate...")
+	adminKey, adminCert, err := i.generateClientCert(caKey, caCert, "admin", "system:masters")
+	if err != nil {
+		return fmt.Errorf("failed to generate admin cert: %w", err)
 	}
 
+	if err := i.saveCertificate(filepath.Join(pkiDir, "admin.crt"), adminCert); err != nil {
+		return err
+	}
+	if err := i.savePrivateKey(filepath.Join(pkiDir, "admin.key"), adminKey); err != nil {
+		return err
+	}
+
+	// 3. Генерируем API server сертификат
+	log.Println("  Generating API server certificate...")
+	apiKey, apiCert, err := i.generateAPIServerCert(caKey, caCert)
+	if err != nil {
+		return fmt.Errorf("failed to generate API server cert: %w", err)
+	}
+
+	if err := i.saveCertificate(filepath.Join(pkiDir, "apiserver.crt"), apiCert); err != nil {
+		return err
+	}
+	if err := i.savePrivateKey(filepath.Join(pkiDir, "apiserver.key"), apiKey); err != nil {
+		return err
+	}
+
+	// 4. Генерируем service account ключи
+	log.Println("  Generating service account keys...")
+	saKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate service account key: %w", err)
+	}
+
+	if err := i.savePrivateKey(filepath.Join(pkiDir, "sa.key"), saKey); err != nil {
+		return err
+	}
+	if err := i.savePublicKey(filepath.Join(pkiDir, "sa.pub"), &saKey.PublicKey); err != nil {
+		return err
+	}
+
+	// 5. Копируем CA в kubelet директорию
+	kubeletPkiDir := filepath.Join(i.kubeletDir, "pki")
+	if err := i.copyCertificate(
+		filepath.Join(pkiDir, "ca.crt"),
+		filepath.Join(kubeletPkiDir, "ca.crt"),
+	); err != nil {
+		log.Printf("Warning: failed to copy CA to kubelet dir: %v", err)
+	}
+
+	// Также копируем в /var/lib/kubelet для kubelet config
+	if err := i.copyCertificate(
+		filepath.Join(pkiDir, "ca.crt"),
+		filepath.Join(i.kubeletDir, "ca.crt"),
+	); err != nil {
+		log.Printf("Warning: failed to copy CA to kubelet root: %v", err)
+	}
+
+	log.Println("  ✓ All certificates generated successfully")
 	return nil
 }
 
-func (i *Installer) generateCA() error {
-	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+func (i *Installer) generateCA() (*rsa.PrivateKey, *x509.Certificate, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return fmt.Errorf("failed to generate CA key: %w", err)
+		return nil, nil, err
 	}
 
-	caTemplate := x509.Certificate{
+	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			CommonName: "kubelet-ca",
+			CommonName:   "kubernetes-ca",
+			Organization: []string{"Kubernetes"},
 		},
 		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
 
-	caCertBytes, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caKey.PublicKey, caKey)
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
-		return fmt.Errorf("failed to create CA certificate: %w", err)
+		return nil, nil, err
 	}
 
-	// Save CA certificate
-	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCertBytes})
-	
-	certPaths := []string{
-		"/tmp/ca.crt",
-		filepath.Join(i.kubeletDir, "ca.crt"),
-		filepath.Join(i.kubeletDir, "pki", "ca.crt"),
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	for _, path := range certPaths {
-		if err := os.WriteFile(path, caCertPEM, 0644); err != nil {
-			return fmt.Errorf("failed to write CA certificate to %s: %w", path, err)
-		}
-	}
-
-	// Save CA key
-	caKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(caKey),
-	})
-	if err := os.WriteFile("/tmp/ca.key", caKeyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write CA key: %w", err)
-	}
-
-	return nil
+	return key, cert, nil
 }
 
-func (i *Installer) generateServiceAccountKeys() error {
-	saKey, err := rsa.GenerateKey(rand.Reader, 2048)
+func (i *Installer) generateClientCert(caKey *rsa.PrivateKey, caCert *x509.Certificate, cn, org string) (*rsa.PrivateKey, *x509.Certificate, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return fmt.Errorf("failed to generate SA key: %w", err)
+		return nil, nil, err
 	}
 
-	// Save private key
-	saKeyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(saKey),
-	})
-	if err := os.WriteFile("/tmp/sa.key", saKeyPEM, 0600); err != nil {
-		return fmt.Errorf("failed to write SA key: %w", err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().Unix()),
+		Subject: pkix.Name{
+			CommonName:   cn,
+			Organization: []string{org},
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().AddDate(1, 0, 0),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
 
-	// Save public key
-	saPubPEM, err := x509.MarshalPKIXPublicKey(&saKey.PublicKey)
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
 	if err != nil {
-		return fmt.Errorf("failed to marshal SA public key: %w", err)
+		return nil, nil, err
 	}
 
-	saPubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: saPubPEM})
-	if err := os.WriteFile("/tmp/sa.pub", saPubKeyPEM, 0644); err != nil {
-		return fmt.Errorf("failed to write SA public key: %w", err)
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return nil
+	return key, cert, nil
 }
 
-func (i *Installer) createTokenFile() error {
-	tokenContent := "1234567890,admin,admin,system:masters\n"
-	if err := os.WriteFile("/tmp/token.csv", []byte(tokenContent), 0600); err != nil {
-		return fmt.Errorf("failed to write token file: %w", err)
+func (i *Installer) generateAPIServerCert(caKey *rsa.PrivateKey, caCert *x509.Certificate) (*rsa.PrivateKey, *x509.Certificate, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().Unix()),
+		Subject: pkix.Name{
+			CommonName: "kube-apiserver",
+		},
+		NotBefore: time.Now(),
+		NotAfter:  time.Now().AddDate(1, 0, 0),
+		KeyUsage:  x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+			x509.ExtKeyUsageClientAuth,
+		},
+		IPAddresses: []net.IP{
+			net.ParseIP("127.0.0.1"),
+			net.ParseIP("10.0.0.1"),
+		},
+		DNSNames: []string{
+			"kubernetes",
+			"kubernetes.default",
+			"kubernetes.default.svc",
+			"kubernetes.default.svc.cluster.local",
+			"localhost",
+		},
+	}
+
+	certBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cert, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return key, cert, nil
+}
+
+func (i *Installer) saveCertificate(path string, cert *x509.Certificate) error {
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Raw,
+	})
+	return os.WriteFile(path, certPEM, 0644)
+}
+
+func (i *Installer) savePrivateKey(path string, key *rsa.PrivateKey) error {
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+	return os.WriteFile(path, keyPEM, 0600)
+}
+
+func (i *Installer) savePublicKey(path string, key *rsa.PublicKey) error {
+	pubBytes, err := x509.MarshalPKIXPublicKey(key)
+	if err != nil {
+		return err
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubBytes,
+	})
+	return os.WriteFile(path, pubPEM, 0644)
+}
+
+func (i *Installer) copyCertificate(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0644)
 }

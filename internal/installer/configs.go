@@ -155,18 +155,22 @@ func (i *Installer) ConfigureKubectl() error {
 		}
 	}
 
-	// Кандидаты для сертификатов
+	// Кандидаты для сертификатов (проверяем оба варианта)
+	pkiDir := filepath.Join(i.baseDir, "pki")
 	caCandidates := []string{
-		filepath.Join(i.baseDir, "pki", "ca.crt"),
+		filepath.Join(pkiDir, "ca.crt"),
 		"/etc/kubernetes/pki/ca.crt",
+		"/var/lib/kubernetes/pki/ca.crt",
 	}
 	adminCrtCandidates := []string{
-		filepath.Join(i.baseDir, "pki", "admin.crt"),
+		filepath.Join(pkiDir, "admin.crt"),
 		"/etc/kubernetes/pki/admin.crt",
+		"/var/lib/kubernetes/pki/admin.crt",
 	}
 	adminKeyCandidates := []string{
-		filepath.Join(i.baseDir, "pki", "admin.key"),
+		filepath.Join(pkiDir, "admin.key"),
 		"/etc/kubernetes/pki/admin.key",
+		"/var/lib/kubernetes/pki/admin.key",
 	}
 
 	// Ждем сертификаты (увеличили timeout)
