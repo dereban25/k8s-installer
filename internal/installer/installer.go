@@ -75,18 +75,12 @@ func (i *Installer) Run() error {
 
 	return nil
 }
-
-func (i *Installer) CreateDirectories() error {
-	dirs := []string{
-		filepath.Join(i.baseDir, "bin"),
-		filepath.Join(i.baseDir, "pki"),
-		filepath.Join(i.baseDir, "manifests"),
-		"/etc/cni/net.d",
-	}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return fmt.Errorf("failed to create dir %s: %w", d, err)
-		}
-	}
-	return nil
+inst := &Installer{
+    config:      cfg,
+    baseDir:     baseDir,
+    kubeletDir:  kubeletDir,
+    services:    services.NewManager(baseDir, kubeletDir, hostIP, cfg.SkipAPIWait),
+    etcdDataDir: filepath.Join(baseDir, "etcd"),
+    manifestsDir: filepath.Join(baseDir, "manifests"),
+    cniConfDir:  "/etc/cni/net.d",
 }
