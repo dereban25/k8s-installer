@@ -92,12 +92,51 @@ jobs:
         export CONTAINERD_MAX_RETRIES=150
         export TMPDIR=/tmp
         
+        # Проверяем что systemd службы действительно остановлены
+        echo "=== Pre-installation checks ==="
+        systemctl is-active containerd 2>/dev/null && echo "Containerd service still active" || echo "Containerd service stopped"
+        systemctl is-active docker 2>/dev/null && echo "Docker service still active" || echo "Docker service stopped"
+        
+        # Убеждаемся что процессы убиты
+        if pgrep -f containerd > /dev/null; then
+          echo "Warning: containerd processes still running, killing..."
+          sudo pkill -9 -f containerd
+          sleep 3
+        fi
+        
+        if pgrep -f dockerd > /dev/null; then
+          echo "Warning: docker processes still running, killing..."
+          sudo pkill -9 -f dockerd
+          sleep 3
+        fi
+        
+        echo "=== Creating log directory ==="
+        sudo mkdir -p /var/log/kubernetes
+        sudo chmod 777 /var/log/kubernetes  # Временно разрешаем всем писать
+        
         # Запускаем с дополнительным логированием
+        echo "=== Starting installer ==="
         sudo -E ./k8s-installer -skip-api-wait -verbose 2>&1 | tee installer.log
         
+        INSTALLER_EXIT_CODE=${PIPESTATUS[0]}
         echo ""
         echo "=== Installation completed ==="
-        echo "Exit code: $?"
+        echo "Exit code: $INSTALLER_EXIT_CODE"
+        
+        if [ $INSTALLER_EXIT_CODE -ne 0 ]; then
+          echo "=== Installation failed, checking for partial setup ==="
+          
+          # Проверяем что создал installer
+          echo "Checking created files:"
+          ls -la /var/lib/kubernetes/ 2>/dev/null || echo "No kubernetes lib dir"
+          ls -la /var/log/kubernetes/ 2>/dev/null || echo "No kubernetes log dir"
+          
+          # Проверяем процессы после сбоя
+          echo "Processes after installation:"
+          ps aux | grep -E 'kube|etcd|containerd' | grep -v grep || echo "No k8s processes"
+          
+          exit $INSTALLER_EXIT_CODE
+        fi
 
     # Более детальная проверка containerd после установки
     - name: Verify containerd installation
@@ -114,6 +153,55 @@ jobs:
           ps aux | grep containerd | grep -v grep
         else
           echo "✗ Containerd process not found"
+          
+          echo ""
+          echo "=== Investigating why containerd didn't start ==="
+          
+          # Проверяем бинарник
+          echo "Checking containerd binary:"
+          ls -la ./kubebuilder/bin/containerd 2>/dev/null || echo "Custom containerd binary not found"
+          ls -la /usr/bin/containerd 2>/dev/null || echo "System containerd binary not found"
+          
+          # Проверяем конфигурацию
+          echo ""
+          echo "Checking containerd config:"
+          ls -la /etc/containerd/ 2>/dev/null || echo "No containerd config directory"
+          if [ -f "/etc/containerd/config.toml" ]; then
+            echo "Config file exists:"
+            sudo head -20 /etc/containerd/config.toml
+          else
+            echo "No config.toml found"
+          fi
+          
+          # Проверяем логи установки
+          echo ""
+          echo "Installer log (last 30 lines):"
+          tail -30 installer.log | grep -A5 -B5 -i containerd || echo "No containerd mentions in installer log"
+          
+          # Пробуем запустить containerd вручную для диагностики
+          echo ""
+          echo "=== Manual containerd test ==="
+          if [ -f "./kubebuilder/bin/containerd" ]; then
+            echo "Testing custom containerd binary:"
+            timeout 10 sudo ./kubebuilder/bin/containerd --version || echo "Custom binary failed"
+            
+            echo "Attempting manual start (5 seconds):"
+            timeout 5 sudo ./kubebuilder/bin/containerd -c /etc/containerd/config.toml 2>&1 || echo "Manual start failed"
+          else
+            echo "No custom containerd binary found"
+          fi
+          
+          # Проверяем системный containerd
+          echo ""
+          echo "System containerd test:"
+          timeout 5 sudo /usr/bin/containerd --version 2>/dev/null || echo "System containerd not working"
+          
+          # Проверяем директории и права
+          echo ""
+          echo "Directory permissions:"
+          ls -la /var/lib/containerd/ 2>/dev/null || echo "No containerd data dir"
+          ls -la /run/containerd/ 2>/dev/null || echo "No containerd run dir"
+          
           exit 1
         fi
         
