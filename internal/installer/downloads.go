@@ -105,4 +105,15 @@ func (i *Installer) extractArchive(archivePath string) error {
 	case strings.Contains(archivePath, "cni-plugins"):
 		cmd = exec.Command("tar", "zxf", archivePath, "-C", "/opt/cni/bin/")
 	case strings.Contains(archivePath, "crictl"):
-		cmd = exec.Command("tar", "zxf", archivePath, "-C", filep
+		cmd = exec.Command("tar", "zxf", archivePath, "-C", filepath.Join(i.baseDir, "bin"))
+	default:
+		return fmt.Errorf("unknown archive type: %s", archivePath)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("extraction failed: %w, output: %s", err, output)
+	}
+
+	return nil
+}
