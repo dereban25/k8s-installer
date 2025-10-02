@@ -71,24 +71,30 @@ jobs:
         
         echo "✓ kubeconfig correctly configured"
 
-    # 🔑 TCP проверка подключения
+    # 🔑 TCP проверка подключения с увеличенным количеством попыток
     - name: Test API TCP connection
       run: |
         echo "=== Testing TCP connection to API server ==="
         
-        for i in {1..10}; do
+        for i in {1..30}; do
           if timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/6443' 2>/dev/null; then
             echo "✓ Connected to 127.0.0.1:6443 (attempt $i)"
             exit 0
           fi
-          echo "⏳ Attempt $i/10 failed, retrying..."
-          sleep 3
+          echo "⏳ Attempt $i/30 failed, retrying in 2 seconds..."
+          sleep 2
         done
         
-        echo "❌ ERROR: Cannot connect to 127.0.0.1:6443"
+        echo "❌ ERROR: Cannot connect to 127.0.0.1:6443 after 30 attempts"
+        echo ""
+        echo "=== Checking API server process ==="
+        ps aux | grep kube-apiserver | grep -v grep || echo "API server not running"
         echo ""
         echo "=== Port listeners ==="
-        sudo netstat -tlnp | grep -E ':(6443|8080)'
+        sudo netstat -tlnp | grep -E ':(6443|8080)' || echo "No listeners on 6443/8080"
+        echo ""
+        echo "=== API server logs ==="
+        sudo journalctl -u kube-apiserver --no-pager -n 50 || echo "No logs available"
         exit 1
 
     - name: Test kubectl client

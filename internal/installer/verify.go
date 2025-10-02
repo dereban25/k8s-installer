@@ -19,19 +19,41 @@ func (i *Installer) TestAPIServerConnection() error {
 		"localhost:6443",
 	}
 	
-	for _, addr := range addresses {
-		log.Printf("  Trying %s...", addr)
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err != nil {
-			log.Printf("  ✗ Failed: %v", err)
-			continue
+	// Увеличиваем количество попыток и время ожидания
+	maxAttempts := 30
+	retryDelay := 2 * time.Second
+	
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		for _, addr := range addresses {
+			if attempt == 1 || attempt%5 == 0 {
+				log.Printf("  Attempt %d/%d: trying %s...", attempt, maxAttempts, addr)
+			}
+			
+			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+			if err == nil {
+				conn.Close()
+				log.Printf("  ✓ Connected to %s after %d attempts", addr, attempt)
+				return nil
+			}
 		}
-		conn.Close()
-		log.Printf("  ✓ Connected to %s", addr)
-		return nil
+		
+		if attempt < maxAttempts {
+			time.Sleep(retryDelay)
+		}
 	}
 	
-	return fmt.Errorf("cannot establish TCP connection to API server")
+	log.Println("  ✗ Failed to connect after all attempts")
+	log.Println("  Checking if API server process is running...")
+	
+	// Дополнительная диагностика
+	if exec.Command("pgrep", "kube-apiserver").Run() == nil {
+		log.Println("  ⚠️  API server process is running but not listening on port 6443")
+		log.Println("  This might be a timing issue - the API server may still be starting")
+	} else {
+		log.Println("  ✗ API server process is not running")
+	}
+	
+	return fmt.Errorf("cannot establish TCP connection to API server after %d attempts", maxAttempts)
 }
 
 // VerifyKubeconfigSetup проверяет корректность kubeconfig
