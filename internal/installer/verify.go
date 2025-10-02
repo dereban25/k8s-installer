@@ -278,25 +278,62 @@ func (i *Installer) TestDeployment() error {
 	
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 	
-	// Create test deployment
-	cmd := exec.Command(kubectlPath, "create", "deployment", "nginx", "--image=nginx:latest")
+	// Сначала проверим что есть готовые ноды
+	log.Println("  Checking for ready nodes...")
+	cmd := exec.Command(kubectlPath, "get", "nodes", "-o", 
+		"jsonpath={.items[?(@.status.conditions[?(@.type=='Ready' && @.status=='True')])].metadata.name}")
+	output, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) == "" {
+		log.Println("  No ready nodes found!")
+		
+		// Показываем все ноды для диагностики
+		allNodesCmd := exec.Command(kubectlPath, "get", "nodes", "-o", "wide")
+		if nodesOutput, _ := allNodesCmd.CombinedOutput(); len(nodesOutput) > 0 {
+			log.Printf("  Current nodes:\n%s", string(nodesOutput))
+		}
+		
+		// Показываем taints
+		taintsCmd := exec.Command(kubectlPath, "get", "nodes", "-o", 
+			"custom-columns=NAME:.metadata.name,TAINTS:.spec.taints")
+		if taintsOutput, _ := taintsCmd.CombinedOutput(); len(taintsOutput) > 0 {
+			log.Printf("  Node taints:\n%s", string(taintsOutput))
+		}
+		
+		return fmt.Errorf("no ready nodes available for scheduling")
+	}
+	
+	readyNodes := strings.TrimSpace(string(output))
+	log.Printf("  Found ready node(s): %s", readyNodes)
+	
+	// Создаем deployment
+	cmd = exec.Command(kubectlPath, "create", "deployment", "nginx", "--image=nginx:latest")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		if !strings.Contains(string(output), "already exists") {
 			return fmt.Errorf("failed to create deployment: %w\nOutput: %s", err, string(output))
 		}
 		log.Println("  Deployment already exists, checking status...")
+	} else {
+		log.Println("  Deployment created")
 	}
 	
-	// Wait for pod (increased timeout to 180 seconds)
+	// Ждем pod с увеличенным таймаутом
 	log.Println("  Waiting for pod to be ready (up to 3 minutes)...")
-	cmd = exec.Command(kubectlPath, "wait", "--for=condition=ready", "pod", "-l", "app=nginx", "--timeout=180s")
+	cmd = exec.Command(kubectlPath, "wait", "--for=condition=ready", 
+		"pod", "-l", "app=nginx", "--timeout=180s")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("  Pod status check output: %s", string(output))
+		log.Printf("  Pod wait failed: %s", string(output))
 		
-		// Show pod details for debugging
-		descCmd := exec.Command(kubectlPath, "get", "pods", "-l", "app=nginx", "-o", "wide")
+		// Детальная диагностика
+		log.Println("  Pod details:")
+		podCmd := exec.Command(kubectlPath, "get", "pods", "-l", "app=nginx", "-o", "wide")
+		if podOutput, _ := podCmd.CombinedOutput(); len(podOutput) > 0 {
+			log.Printf("%s", string(podOutput))
+		}
+		
+		// Описание пода
+		descCmd := exec.Command(kubectlPath, "describe", "pods", "-l", "app=nginx")
 		if descOutput, _ := descCmd.CombinedOutput(); len(descOutput) > 0 {
-			log.Printf("  Pod details:\n%s", string(descOutput))
+			log.Printf("  Pod description:\n%s", string(descOutput))
 		}
 		
 		return fmt.Errorf("pod did not become ready: %w", err)
