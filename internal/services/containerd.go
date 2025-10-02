@@ -10,8 +10,14 @@ import (
 )
 
 func (m *Manager) StartContainerd() error {
-	cmd := exec.Command("/opt/cni/bin/containerd", "-c", "/etc/containerd/config.toml")
-	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH")+":/opt/cni/bin:/usr/sbin")
+	cmd := exec.Command(
+		filepath.Join(m.baseDir, "bin", "containerd"),
+		"-c", "/etc/containerd/config.toml",
+	)
+	// добавляем PATH, чтобы точно находились crictl/ctr
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH")+":"+filepath.Join(m.baseDir, "bin")+":/usr/local/bin:/usr/sbin",
+	)
 
 	if err := m.startDaemon(cmd, "/var/log/kubernetes/containerd.log"); err != nil {
 		return err
@@ -22,7 +28,6 @@ func (m *Manager) StartContainerd() error {
 }
 
 func (m *Manager) waitForContainerd() error {
-	// Таймаут можно задать через env: CONTAINERD_MAX_RETRIES (в секундах)
 	maxRetries := 60
 	if v := os.Getenv("CONTAINERD_MAX_RETRIES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -30,30 +35,34 @@ func (m *Manager) waitForContainerd() error {
 		}
 	}
 
-	// Одновременный tail логов — сразу видны реальные причины падения
-	go func() {
-		cmd := exec.Command("tail", "-n", "20", "-f", "/var/log/kubernetes/containerd.log")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		_ = cmd.Run()
-	}()
-
 	for i := 0; i < maxRetries; i++ {
-		// Есть ли процесс?
+		// Проверяем процесс
 		if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err != nil && i%5 == 0 {
 			log.Println("  ⚠ containerd process not found yet")
 		}
 
-		// Появился ли сокет?
+		// Проверяем сокет
 		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
-			// Проверяем доступ через crictl
-			cmd := exec.Command("crictl", "--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version")
-			if err := cmd.Run(); err == nil {
-				log.Println("  ✓ Containerd is ready")
-				time.Sleep(2 * time.Second) // дать инициализироваться
+			// crictl
+			if _, err := exec.LookPath("crictl"); err == nil {
+				if exec.Command("crictl", "--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version").Run() == nil {
+					log.Println("  ✓ Containerd is ready (crictl)")
+					time.Sleep(2 * time.Second)
+					return nil
+				}
+			}
+			// ctr
+			if _, err := exec.LookPath("ctr"); err == nil {
+				if exec.Command("ctr", "--address", "/run/containerd/containerd.sock", "version").Run() == nil {
+					log.Println("  ✓ Containerd is ready (ctr)")
+					time.Sleep(2 * time.Second)
+					return nil
+				}
+			}
+			// fallback: если сокет есть и процесс жив — ок
+			if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err == nil && i > 5 {
+				log.Println("  ⚠ No crictl/ctr; socket present and process running — proceeding")
 				return nil
-			} else if i%5 == 0 {
-				log.Printf("  ⚠ crictl check failed: %v", err)
 			}
 		} else if i%5 == 0 {
 			log.Printf("  ⚠ containerd.sock not found yet: %v", err)

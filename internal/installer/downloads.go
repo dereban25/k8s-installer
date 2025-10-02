@@ -102,3 +102,29 @@ func (i *Installer) extractArchive(archivePath string) error {
 
 	return nil
 }
+
+// В список версий
+const (
+    ContainerdVersion  = "2.0.5"
+    RuncVersion        = "v1.2.6"
+    CNIPluginsVersion  = "v1.6.2"
+    KubebuilderVersion = "1.30.0"
+    CrictlVersion      = "v1.30.0"
+)
+
+// В DownloadBinaries()
+downloads := []struct {
+    url  string
+    dest string
+}{
+    {fmt.Sprintf("https://github.com/kubernetes-sigs/cri-tools/releases/download/%s/crictl-%s-linux-amd64.tar.gz", CrictlVersion, CrictlVersion),
+     filepath.Join(i.baseDir, "bin", "crictl.tar.gz")},
+    // ... остальные
+}
+
+// После загрузки распаковываем crictl
+if strings.Contains(d.dest, "crictl") {
+    if err := utils.ExtractTarGz(d.dest, filepath.Join(i.baseDir, "bin")); err != nil {
+        return fmt.Errorf("failed to extract crictl: %w", err)
+    }
+}
