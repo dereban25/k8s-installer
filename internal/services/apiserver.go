@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -11,10 +12,22 @@ import (
 )
 
 func (m *Manager) StartAPIServer() error {
+	// Проверяем, доступен ли m.hostIP
+	etcdEndpoint := "127.0.0.1"
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:2379", m.hostIP), 500*time.Millisecond)
+	if err == nil {
+		// если коннектится — используем hostIP
+		_ = conn.Close()
+		etcdEndpoint = m.hostIP
+		log.Printf("  ✓ etcd доступен по %s:2379, используем его", m.hostIP)
+	} else {
+		log.Printf("  ⚠ etcd по %s:2379 недоступен, переключаемся на 127.0.0.1", m.hostIP)
+	}
+
 	cmd := exec.Command(
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
-		fmt.Sprintf("--etcd-servers=http://%s:2379", m.hostIP),
-		"--service-cluster-ip-range=10.0.0.0/24",
+		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
+		"--service-cluster-ip-range=10.0.0.0/16", // расширенный диапазон
 		"--bind-address=0.0.0.0",
 		"--secure-port=6443",
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
