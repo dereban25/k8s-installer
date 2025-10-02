@@ -49,7 +49,7 @@ func New(cfg *Config) (*Installer, error) {
 		hostIP:       hostIP,
 	}
 
-	inst.services = services.NewManager(inst.baseDir, inst.kubeletDir, inst.hostIP)
+	inst.services = services.NewManager(inst.baseDir, inst.kubeletDir, inst.hostIP, cfg.SkipVerify)
 
 	return inst, nil
 }

@@ -1,30 +1,19 @@
 package services
 
-import (
-	"log"
-)
-
-// Manager управляет системными сервисами (etcd, api-server, containerd и т.д.)
+// Manager управляет системными сервисами (etcd, api-server, kubelet, containerd и т.д.)
 type Manager struct {
-	baseDir    string
-	kubeletDir string
-	hostIP     string
-	verbose    bool
+	baseDir     string
+	kubeletDir  string
+	hostIP      string
+	skipAPIWait bool
 }
 
-// NewManager создаёт новый менеджер сервисов
-func NewManager(baseDir, kubeletDir, hostIP string, verbose bool) *Manager {
+// NewManager: (string, string, string, bool) — последний флаг = skipAPIWait (fast mode)
+func NewManager(baseDir, kubeletDir, hostIP string, skipAPIWait bool) *Manager {
 	return &Manager{
-		baseDir:    baseDir,
-		kubeletDir: kubeletDir,
-		hostIP:     hostIP,
-		verbose:    verbose,
-	}
-}
-
-// Лог-хелпер
-func (m *Manager) logf(format string, args ...interface{}) {
-	if m.verbose {
-		log.Printf(format, args...)
+		baseDir:     baseDir,
+		kubeletDir:  kubeletDir,
+		hostIP:      hostIP,
+		skipAPIWait: skipAPIWait,
 	}
 }
