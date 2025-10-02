@@ -18,6 +18,14 @@ type download struct {
 	chmod    bool
 }
 
+const (
+	ContainerdVersion  = "2.0.5"
+	RuncVersion        = "v1.2.6"
+	CNIPluginsVersion  = "v1.6.2"
+	KubebuilderVersion = "1.30.0"
+	CrictlVersion      = "v1.30.0"
+)
+
 func (i *Installer) DownloadBinaries() error {
 	downloads := []download{
 		{
@@ -55,11 +63,16 @@ func (i *Installer) DownloadBinaries() error {
 			destPath: "/tmp/cni-plugins.tgz",
 			extract:  true,
 		},
+		{
+			url:      fmt.Sprintf("https://github.com/kubernetes-sigs/cri-tools/releases/download/%s/crictl-%s-linux-amd64.tar.gz", CrictlVersion, CrictlVersion),
+			destPath: "/tmp/crictl.tar.gz",
+			extract:  true,
+		},
 	}
 
 	for _, dl := range downloads {
 		log.Printf("  Downloading %s...", filepath.Base(dl.url))
-		
+
 		if err := utils.DownloadFile(dl.url, dl.destPath); err != nil {
 			return fmt.Errorf("failed to download %s: %w", dl.url, err)
 		}
@@ -91,40 +104,5 @@ func (i *Installer) extractArchive(archivePath string) error {
 		cmd = exec.Command("tar", "zxf", archivePath, "-C", "/opt/cni/")
 	case strings.Contains(archivePath, "cni-plugins"):
 		cmd = exec.Command("tar", "zxf", archivePath, "-C", "/opt/cni/bin/")
-	default:
-		return fmt.Errorf("unknown archive type: %s", archivePath)
-	}
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("extraction failed: %w, output: %s", err, output)
-	}
-
-	return nil
-}
-
-// В список версий
-const (
-    ContainerdVersion  = "2.0.5"
-    RuncVersion        = "v1.2.6"
-    CNIPluginsVersion  = "v1.6.2"
-    KubebuilderVersion = "1.30.0"
-    CrictlVersion      = "v1.30.0"
-)
-
-// В DownloadBinaries()
-downloads := []struct {
-    url  string
-    dest string
-}{
-    {fmt.Sprintf("https://github.com/kubernetes-sigs/cri-tools/releases/download/%s/crictl-%s-linux-amd64.tar.gz", CrictlVersion, CrictlVersion),
-     filepath.Join(i.baseDir, "bin", "crictl.tar.gz")},
-    // ... остальные
-}
-
-// После загрузки распаковываем crictl
-if strings.Contains(d.dest, "crictl") {
-    if err := utils.ExtractTarGz(d.dest, filepath.Join(i.baseDir, "bin")); err != nil {
-        return fmt.Errorf("failed to extract crictl: %w", err)
-    }
-}
+	case strings.Contains(archivePath, "crictl"):
+		cmd = exec.Command("tar", "zxf", archivePath, "-C", filep
