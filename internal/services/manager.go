@@ -1,5 +1,9 @@
 package services
-
+import (
+	"fmt"
+	"os"
+	"os/exec"
+)
 // Manager управляет системными сервисами (etcd, api-server, kubelet, containerd и т.д.)
 type Manager struct {
 	baseDir     string
