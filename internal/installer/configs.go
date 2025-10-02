@@ -10,15 +10,12 @@ func (i *Installer) CreateConfigurations() error {
 	if err := i.createCNIConfig(); err != nil {
 		return err
 	}
-
 	if err := i.createContainerdConfig(); err != nil {
 		return err
 	}
-
 	if err := i.createKubeletConfig(); err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -107,6 +104,7 @@ staticPodPath: "/etc/kubernetes/manifests"
 	return nil
 }
 
+// ✅ Новый ConfigureKubectl с сертификатами
 func (i *Installer) ConfigureKubectl() error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -118,13 +116,26 @@ func (i *Installer) ConfigureKubectl() error {
 		return fmt.Errorf("failed to create .kube directory: %w", err)
 	}
 
+	kubeconfigPath := filepath.Join(kubeDir, "config")
+	caCert := filepath.Join(i.baseDir, "pki", "ca.crt")
+	adminCert := filepath.Join(i.baseDir, "pki", "admin.crt")
+	adminKey := filepath.Join(i.baseDir, "pki", "admin.key")
+
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 
 	commands := [][]string{
-		{kubectlPath, "config", "set-credentials", "test-user", "--token=1234567890"},
-		{kubectlPath, "config", "set-cluster", "test-env", "--server=https://127.0.0.1:6443", "--insecure-skip-tls-verify"},
-		{kubectlPath, "config", "set-context", "test-context", "--cluster=test-env", "--user=test-user", "--namespace=default"},
-		{kubectlPath, "config", "use-context", "test-context"},
+		{kubectlPath, "config", "set-cluster", "local-cluster",
+			"--server=https://127.0.0.1:6443",
+			"--certificate-authority", caCert,
+			"--embed-certs=true"},
+		{kubectlPath, "config", "set-credentials", "admin",
+			"--client-certificate", adminCert,
+			"--client-key", adminKey,
+			"--embed-certs=true"},
+		{kubectlPath, "config", "set-context", "local-context",
+			"--cluster=local-cluster",
+			"--user=admin"},
+		{kubectlPath, "config", "use-context", "local-context"},
 	}
 
 	for _, cmd := range commands {
@@ -133,15 +144,12 @@ func (i *Installer) ConfigureKubectl() error {
 		}
 	}
 
-	// Copy kubeconfig for kubelet
-	kubeconfigPath := filepath.Join(kubeDir, "config")
-	kubeletKubeconfigPath := filepath.Join(i.kubeletDir, "kubeconfig")
-	
+	// Копия для kubelet
 	input, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to read kubeconfig: %w", err)
 	}
-	
+	kubeletKubeconfigPath := filepath.Join(i.kubeletDir, "kubeconfig")
 	if err := os.WriteFile(kubeletKubeconfigPath, input, 0644); err != nil {
 		return fmt.Errorf("failed to write kubelet kubeconfig: %w", err)
 	}
