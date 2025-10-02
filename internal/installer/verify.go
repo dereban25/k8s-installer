@@ -272,3 +272,36 @@ func runCommandWithCheck(name string, args ...string) error {
 	}
 	return nil
 }
+
+func (i *Installer) TestDeployment() error {
+	log.Println("Testing deployment...")
+	
+	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
+	
+	// Create test deployment
+	cmd := exec.Command(kubectlPath, "create", "deployment", "nginx", "--image=nginx:latest")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		if !strings.Contains(string(output), "already exists") {
+			return fmt.Errorf("failed to create deployment: %w\nOutput: %s", err, string(output))
+		}
+		log.Println("  Deployment already exists, checking status...")
+	}
+	
+	// Wait for pod (increased timeout to 180 seconds)
+	log.Println("  Waiting for pod to be ready (up to 3 minutes)...")
+	cmd = exec.Command(kubectlPath, "wait", "--for=condition=ready", "pod", "-l", "app=nginx", "--timeout=180s")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("  Pod status check output: %s", string(output))
+		
+		// Show pod details for debugging
+		descCmd := exec.Command(kubectlPath, "get", "pods", "-l", "app=nginx", "-o", "wide")
+		if descOutput, _ := descCmd.CombinedOutput(); len(descOutput) > 0 {
+			log.Printf("  Pod details:\n%s", string(descOutput))
+		}
+		
+		return fmt.Errorf("pod did not become ready: %w", err)
+	}
+	
+	log.Println("  Test deployment successful")
+	return nil
+}

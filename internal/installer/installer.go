@@ -78,30 +78,32 @@ func (i *Installer) Run() error {
 		{"Creating configurations", i.CreateConfigurations},
 		{"Starting etcd", i.services.StartEtcd},
 		{"Starting API server", i.services.StartAPIServer},
-		{"Configure kubectl", i.ConfigureKubectl},  // Перенесли ПОСЛЕ генерации сертификатов
+		{"Configure kubectl", i.ConfigureKubectl},
 		{"Testing API connectivity", i.TestAPIServerConnection},
 		{"Verifying kubeconfig", i.VerifyKubeconfigSetup},
 		{"Starting containerd", i.services.StartContainerd},
 		{"Starting controller-manager", i.services.StartControllerManager},
 		{"Starting scheduler", i.services.StartScheduler},
 		{"Starting kubelet", i.services.StartKubelet},
+		{"Creating system namespaces", i.services.CreateSystemNamespaces},  // Added this step
 		{"Creating default resources", i.CreateDefaultResources},
 		{"Verifying installation", i.VerifyInstallation},
+		{"Testing deployment", i.TestDeployment},  // Added test step
 	}
 
-	log.Println("🚀 Starting Kubernetes installation...")
+	log.Println("Starting Kubernetes installation...")
 	for _, step := range steps {
 		log.Printf("=> %s...", step.name)
 		if err := step.fn(); err != nil {
 			if i.config.ContinueOnError {
-				log.Printf("✗ WARNING: %s failed: %v", step.name, err)
+				log.Printf("WARNING: %s failed: %v", step.name, err)
 				continue
 			}
 			return fmt.Errorf("failed at step '%s': %w", step.name, err)
 		}
-		log.Printf("✓ %s completed", step.name)
+		log.Printf("%s completed", step.name)
 	}
 
-	log.Println("✅ Kubernetes installation completed successfully!")
+	log.Println("Kubernetes installation completed successfully!")
 	return nil
 }

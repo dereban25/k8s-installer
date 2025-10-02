@@ -27,7 +27,8 @@ func (m *Manager) StartKubelet() error {
 		fmt.Sprintf("--node-ip=%s", m.hostIP),
 		"--cloud-provider=external",
 		"--cgroup-driver=cgroupfs",
-		"--max-pods=4",
+		"--max-pods=10",
+		"--runtime-request-timeout=5m",
 		"--v=1",
 	)
 	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH")+":/opt/cni/bin:/usr/sbin")
@@ -36,25 +37,34 @@ func (m *Manager) StartKubelet() error {
 		return err
 	}
 
-	// Wait longer for node registration
 	log.Println("  Waiting for node registration...")
-	time.Sleep(15 * time.Second)
+	return m.waitForNodeReady(hostname)
+}
 
-	// Label the node with retries
+func (m *Manager) waitForNodeReady(hostname string) error {
 	kubectlPath := filepath.Join(m.baseDir, "bin", "kubectl")
-	for retry := 0; retry < 5; retry++ {
-		labelCmd := exec.Command(kubectlPath, "label", "node", hostname, "node-role.kubernetes.io/master=", "--overwrite")
-		output, err := labelCmd.CombinedOutput()
-		if err == nil || strings.Contains(string(output), "already has") {
-			log.Println("  ✓ Node labeled successfully")
+	maxRetries := 60
+	
+	for i := 0; i < maxRetries; i++ {
+		cmd := exec.Command(kubectlPath, "get", "node", hostname, "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+		output, err := cmd.Output()
+		
+		if err == nil && strings.TrimSpace(string(output)) == "True" {
+			log.Println("  Node is Ready")
+			
+			labelCmd := exec.Command(kubectlPath, "label", "node", hostname, "node-role.kubernetes.io/master=", "--overwrite")
+			if err := labelCmd.Run(); err == nil {
+				log.Println("  Node labeled successfully")
+			}
 			return nil
 		}
-		if retry < 4 {
-			log.Printf("  Retrying node labeling... (%d/5)", retry+2)
-			time.Sleep(5 * time.Second)
+		
+		if i%10 == 0 && i > 0 {
+			log.Printf("  Waiting for node to become Ready... (%d/%d)", i, maxRetries)
 		}
+		time.Sleep(3 * time.Second)
 	}
-
-	log.Println("  Warning: Failed to label node, but continuing...")
+	
+	log.Println("  Warning: Node not ready yet, but continuing...")
 	return nil
 }

@@ -15,23 +15,19 @@ import (
 	"time"
 )
 
-// GenerateCertificates генерирует все необходимые сертификаты
 func (i *Installer) GenerateCertificates() error {
 	pkiDir := filepath.Join(i.baseDir, "pki")
 	
-	// Проверяем, что директория существует
 	if _, err := os.Stat(pkiDir); os.IsNotExist(err) {
 		return fmt.Errorf("PKI directory does not exist: %s (run CreateDirectories first)", pkiDir)
 	}
 
-	// 1. Генерируем CA
 	log.Println("  Generating CA certificate...")
 	caKey, caCert, err := i.generateCA()
 	if err != nil {
 		return fmt.Errorf("failed to generate CA: %w", err)
 	}
 
-	// Сохраняем CA
 	if err := i.saveCertificate(filepath.Join(pkiDir, "ca.crt"), caCert); err != nil {
 		return err
 	}
@@ -39,7 +35,6 @@ func (i *Installer) GenerateCertificates() error {
 		return err
 	}
 
-	// 2. Генерируем admin сертификат
 	log.Println("  Generating admin certificate...")
 	adminKey, adminCert, err := i.generateClientCert(caKey, caCert, "admin", "system:masters")
 	if err != nil {
@@ -53,7 +48,6 @@ func (i *Installer) GenerateCertificates() error {
 		return err
 	}
 
-	// 3. Генерируем API server сертификат
 	log.Println("  Generating API server certificate...")
 	apiKey, apiCert, err := i.generateAPIServerCert(caKey, caCert)
 	if err != nil {
@@ -67,7 +61,6 @@ func (i *Installer) GenerateCertificates() error {
 		return err
 	}
 
-	// 4. Генерируем service account ключи
 	log.Println("  Generating service account keys...")
 	saKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -81,7 +74,6 @@ func (i *Installer) GenerateCertificates() error {
 		return err
 	}
 
-	// 5. Копируем CA в kubelet директорию
 	kubeletPkiDir := filepath.Join(i.kubeletDir, "pki")
 	if err := i.copyCertificate(
 		filepath.Join(pkiDir, "ca.crt"),
@@ -90,7 +82,6 @@ func (i *Installer) GenerateCertificates() error {
 		log.Printf("Warning: failed to copy CA to kubelet dir: %v", err)
 	}
 
-	// Также копируем в /var/lib/kubelet для kubelet config
 	if err := i.copyCertificate(
 		filepath.Join(pkiDir, "ca.crt"),
 		filepath.Join(i.kubeletDir, "ca.crt"),
@@ -98,7 +89,7 @@ func (i *Installer) GenerateCertificates() error {
 		log.Printf("Warning: failed to copy CA to kubelet root: %v", err)
 	}
 
-	log.Println("  ✓ All certificates generated successfully")
+	log.Println("  All certificates generated successfully")
 	return nil
 }
 
@@ -171,6 +162,20 @@ func (i *Installer) generateAPIServerCert(caKey *rsa.PrivateKey, caCert *x509.Ce
 		return nil, nil, err
 	}
 
+	hostIP := os.Getenv("K8S_HOST_IP")
+	if hostIP == "" {
+		hostIP = "127.0.0.1"
+	}
+
+	ipAddresses := []net.IP{
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("10.0.0.1"),
+	}
+	
+	if parsedIP := net.ParseIP(hostIP); parsedIP != nil && !parsedIP.IsLoopback() {
+		ipAddresses = append(ipAddresses, parsedIP)
+	}
+
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().Unix()),
 		Subject: pkix.Name{
@@ -183,10 +188,7 @@ func (i *Installer) generateAPIServerCert(caKey *rsa.PrivateKey, caCert *x509.Ce
 			x509.ExtKeyUsageServerAuth,
 			x509.ExtKeyUsageClientAuth,
 		},
-		IPAddresses: []net.IP{
-			net.ParseIP("127.0.0.1"),
-			net.ParseIP("10.0.0.1"),
-		},
+		IPAddresses: ipAddresses,
 		DNSNames: []string{
 			"kubernetes",
 			"kubernetes.default",

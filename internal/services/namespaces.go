@@ -1,6 +1,7 @@
 package services
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
 	"path/filepath"
@@ -11,10 +12,20 @@ import (
 func (m *Manager) CreateSystemNamespaces() error {
 	log.Println("  Creating system namespaces...")
 	
-	// Wait a bit for API server to be fully ready
-	time.Sleep(5 * time.Second)
-
 	kubectlPath := filepath.Join(m.baseDir, "bin", "kubectl")
+	
+	// Wait for API to accept requests
+	maxRetries := 30
+	for i := 0; i < maxRetries; i++ {
+		cmd := exec.Command(kubectlPath, "get", "--raw=/healthz")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		if i == maxRetries-1 {
+			return fmt.Errorf("API server not responding after %d seconds", maxRetries)
+		}
+		time.Sleep(1 * time.Second)
+	}
 
 	namespaces := []string{
 		"kube-system",
@@ -28,17 +39,13 @@ func (m *Manager) CreateSystemNamespaces() error {
 		output, err := cmd.CombinedOutput()
 		
 		if err != nil {
-			// Игнорируем ошибку если namespace уже существует
 			if strings.Contains(string(output), "already exists") {
-				log.Printf("  ✓ Namespace '%s' already exists", ns)
+				log.Printf("  Namespace '%s' already exists", ns)
 			} else {
-				log.Printf("  ⚠ Warning: failed to create namespace '%s': %v", ns, err)
-				if m.skipAPIWait {
-					log.Printf("    Output: %s", string(output))
-				}
+				log.Printf("  Warning: failed to create namespace '%s': %v", ns, err)
 			}
 		} else {
-			log.Printf("  ✓ Created namespace '%s'", ns)
+			log.Printf("  Created namespace '%s'", ns)
 		}
 	}
 
