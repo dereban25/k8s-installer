@@ -17,3 +17,17 @@ func NewManager(baseDir, kubeletDir, hostIP string, skipAPIWait bool) *Manager {
 		skipAPIWait: skipAPIWait,
 	}
 }
+// startDaemon запускает процесс и пишет stdout/stderr в лог-файл
+func (m *Manager) startDaemon(cmd *exec.Cmd, logPath string) error {
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть лог %s: %w", logPath, err)
+	}
+	cmd.Stdout = f
+	cmd.Stderr = f
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("не удалось запустить %s: %w", cmd.Path, err)
+	}
+	return nil
+}
