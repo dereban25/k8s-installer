@@ -12,10 +12,10 @@ import (
 )
 
 func (m *Manager) StartAPIServer() error {
-	// По умолчанию используем localhost
+	// По умолчанию etcd = localhost
 	etcdEndpoint := "127.0.0.1"
 
-	// Проверяем health API у etcd по hostIP
+	// Проверим health у etcd по hostIP
 	url := fmt.Sprintf("http://%s:2379/health", m.hostIP)
 	client := &http.Client{Timeout: 1 * time.Second}
 
@@ -26,11 +26,11 @@ func (m *Manager) StartAPIServer() error {
 			etcdEndpoint = m.hostIP
 			log.Printf("  ✓ etcd доступен по %s:2379 (health-check ok), используем его", m.hostIP)
 		} else {
-			log.Printf("  ⚠ etcd health-check по %s:2379 вернул %d (%s), переключаемся на 127.0.0.1",
+			log.Printf("  ⚠ etcd health-check по %s:2379 вернул %d (%s), fallback на 127.0.0.1",
 				m.hostIP, resp.StatusCode, string(body))
 		}
 	} else {
-		log.Printf("  ⚠ etcd health-check по %s:2379 не прошёл (%v), переключаемся на 127.0.0.1",
+		log.Printf("  ⚠ etcd health-check по %s:2379 не прошёл (%v), fallback на 127.0.0.1",
 			m.hostIP, err)
 	}
 
@@ -38,10 +38,10 @@ func (m *Manager) StartAPIServer() error {
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
 		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
 		"--service-cluster-ip-range=10.0.0.0/16",
-		"--bind-address=0.0.0.0",
+		"--bind-address=0.0.0.0",             // ✅ слушаем на всех интерфейсах
 		"--secure-port=6443",
-		"--insecure-port=8080",              // ✅ диагностика (curl http://127.0.0.1:8080/healthz)
-		"--insecure-bind-address=0.0.0.0",   // ✅ диагностика
+		"--insecure-port=8080",               // для диагностики
+		"--insecure-bind-address=0.0.0.0",
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
 		"--authorization-mode=AlwaysAllow",
 		"--anonymous-auth=false",
@@ -57,7 +57,7 @@ func (m *Manager) StartAPIServer() error {
 		"--service-account-key-file=/tmp/sa.pub",
 		"--service-account-signing-key-file=/tmp/sa.key",
 		"--cloud-provider=external",
-		"--v=5", // повышенный уровень логирования
+		"--v=5", // подробные логи
 	)
 
 	if err := m.startDaemon(cmd, "/var/log/kubernetes/apiserver.log"); err != nil {
@@ -65,13 +65,13 @@ func (m *Manager) StartAPIServer() error {
 	}
 
 	if m.skipAPIWait {
-		log.Println("  ⚠️  Skipping API server readiness check (--skip-api-wait enabled)")
+		log.Println("  ⚠️ Skipping API server readiness check (--skip-api-wait enabled)")
 		log.Println("  Giving API server 15 seconds to start...")
 		time.Sleep(15 * time.Second)
 		return nil
 	}
 
-	log.Println("  Waiting for API server to become ready (may take up to 10 minutes)...")
+	log.Println("  Waiting for API server to become ready (up to 10 minutes)...")
 	return m.waitForAPIServer()
 }
 
@@ -89,10 +89,10 @@ func (m *Manager) waitForAPIServer() error {
 
 	for i := 0; i < maxRetries; i++ {
 		urls := []string{
-			"https://127.0.0.1:6443/livez",
+			"https://127.0.0.1:6443/livez", // ✅ всегда проверяем localhost
 			"https://127.0.0.1:6443/readyz",
 			fmt.Sprintf("https://%s:6443/livez", m.hostIP),
-			"http://127.0.0.1:8080/healthz", // ✅ для диагностики
+			"http://127.0.0.1:8080/healthz", // fallback для отладки
 		}
 
 		success := false
@@ -118,7 +118,7 @@ func (m *Manager) waitForAPIServer() error {
 			successCount = 0
 		}
 
-		if i%30 == 0 && i > 0 {
+		if i%30 == 0 && i > 0 { // раз в минуту показываем прогресс
 			log.Printf("  Still waiting... (%d/%d attempts, %d/%d consecutive successes)",
 				i, maxRetries, successCount, requiredSuccesses)
 		}
