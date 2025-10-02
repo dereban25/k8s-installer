@@ -37,8 +37,12 @@ type Config struct {
 	Verbose         bool
 }
 
-// Конструктор
-func New(cfg *Config, baseDir, kubeletDir, hostIP string) *Installer {
+// Конструктор возвращает Installer + error
+func New(cfg *Config, baseDir, kubeletDir, hostIP string) (*Installer, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config cannot be nil")
+	}
+
 	inst := &Installer{
 		config:       cfg,
 		baseDir:      baseDir,
@@ -48,7 +52,7 @@ func New(cfg *Config, baseDir, kubeletDir, hostIP string) *Installer {
 		manifestsDir: filepath.Join(baseDir, "manifests"),
 		cniConfDir:   "/etc/cni/net.d",
 	}
-	return inst
+	return inst, nil
 }
 
 // Запуск всего пайплайна установки
