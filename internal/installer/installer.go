@@ -76,9 +76,9 @@ func (i *Installer) Run() error {
 		{"Downloading binaries", i.DownloadBinaries},
 		{"Generating certificates", i.GenerateCertificates},
 		{"Creating configurations", i.CreateConfigurations},
-		{"Configure kubectl", i.ConfigureKubectl},
 		{"Starting etcd", i.services.StartEtcd},
 		{"Starting API server", i.services.StartAPIServer},
+		{"Configure kubectl", i.ConfigureKubectl},  // Перенесли ПОСЛЕ генерации сертификатов
 		{"Testing API connectivity", i.TestAPIServerConnection},
 		{"Verifying kubeconfig", i.VerifyKubeconfigSetup},
 		{"Starting containerd", i.services.StartContainerd},

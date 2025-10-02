@@ -169,11 +169,11 @@ func (i *Installer) ConfigureKubectl() error {
 		"/etc/kubernetes/pki/admin.key",
 	}
 
-	// Ждем сертификаты
+	// Ждем сертификаты (увеличили timeout)
 	fmt.Println("⏳ Waiting for certificates...")
-	caPath, haveCA := waitForFirstExisting(5*time.Second, caCandidates...)
-	adminCrt, haveAdminCrt := waitForFirstExisting(2*time.Second, adminCrtCandidates...)
-	adminKey, haveAdminKey := waitForFirstExisting(2*time.Second, adminKeyCandidates...)
+	caPath, haveCA := waitForFirstExisting(10*time.Second, caCandidates...)
+	adminCrt, haveAdminCrt := waitForFirstExisting(5*time.Second, adminCrtCandidates...)
+	adminKey, haveAdminKey := waitForFirstExisting(5*time.Second, adminKeyCandidates...)
 
 	if !haveCA {
 		return fmt.Errorf("CA certificate not found - cannot configure kubectl securely")
