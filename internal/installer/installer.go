@@ -18,11 +18,15 @@ const (
 	CrictlVersion      = "v1.30.0"
 )
 
+// Installer управляет процессом установки Kubernetes
 type Installer struct {
-	config     *Config
-	baseDir    string
-	kubeletDir string
-	services   *services.Manager
+	config       *Config
+	baseDir      string
+	kubeletDir   string
+	services     *services.Manager
+	etcdDataDir  string
+	manifestsDir string
+	cniConfDir   string
 }
 
 type Config struct {
@@ -34,16 +38,21 @@ type Config struct {
 	Verbose         bool
 }
 
+// Конструктор
 func New(cfg *Config, baseDir, kubeletDir, hostIP string) *Installer {
 	inst := &Installer{
-		config:     cfg,
-		baseDir:    baseDir,
-		kubeletDir: kubeletDir,
+		config:       cfg,
+		baseDir:      baseDir,
+		kubeletDir:   kubeletDir,
+		services:     services.NewManager(baseDir, kubeletDir, hostIP, cfg.SkipAPIWait),
+		etcdDataDir:  filepath.Join(baseDir, "etcd"),
+		manifestsDir: filepath.Join(baseDir, "manifests"),
+		cniConfDir:   "/etc/cni/net.d",
 	}
-	inst.services = services.NewManager(inst.baseDir, inst.kubeletDir, hostIP, cfg.SkipAPIWait)
 	return inst
 }
 
+// Запуск всего пайплайна установки
 func (i *Installer) Run() error {
 	steps := []struct {
 		name string
@@ -75,12 +84,21 @@ func (i *Installer) Run() error {
 
 	return nil
 }
-inst := &Installer{
-    config:      cfg,
-    baseDir:     baseDir,
-    kubeletDir:  kubeletDir,
-    services:    services.NewManager(baseDir, kubeletDir, hostIP, cfg.SkipAPIWait),
-    etcdDataDir: filepath.Join(baseDir, "etcd"),
-    manifestsDir: filepath.Join(baseDir, "manifests"),
-    cniConfDir:  "/etc/cni/net.d",
+
+// Создание директорий (bin, etcd, manifests, cni)
+func (i *Installer) CreateDirectories() error {
+	dirs := []string{
+		filepath.Join(i.baseDir, "bin"),
+		filepath.Join(i.baseDir, "pki"),
+		i.etcdDataDir,
+		i.manifestsDir,
+		i.cniConfDir,
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("failed to create dir %s: %w", d, err)
+		}
+		log.Printf("  Created: %s", d)
+	}
+	return nil
 }
