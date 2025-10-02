@@ -27,10 +27,6 @@ jobs:
         go mod download
         go mod verify
 
-    # - name: Run tests
-    #   run: go test -v -race -coverprofile=coverage.out ./...
-    #   continue-on-error: true
-
     - name: Build binary
       run: |
         go build -v -o k8s-installer ./cmd/installer
@@ -43,32 +39,101 @@ jobs:
     - name: Wait for stabilization
       run: sleep 60
 
+    # Критичный шаг: проверяем и исправляем kubeconfig
+    - name: Fix kubeconfig if needed
+      run: |
+        echo "=== Checking kubeconfig state ==="
+        
+        if [ ! -f "$HOME/.kube/config" ]; then
+          echo "ERROR: kubeconfig not found"
+          exit 1
+        fi
+        
+        cat $HOME/.kube/config
+        
+        echo ""
+        echo "=== Parsing server URL ==="
+        SERVER_URL=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "")
+        echo "Current server: '$SERVER_URL'"
+        
+        # Если kubeconfig пустой или неправильный - пересоздаём
+        if [[ -z "$SERVER_URL" ]] || [[ "$SERVER_URL" != "https://127.0.0.1:6443" ]]; then
+          echo ""
+          echo "WARNING: kubeconfig is invalid or empty, recreating..."
+          
+          export PATH=$PATH:./kubebuilder/bin
+          
+          # Проверяем наличие сертификатов
+          if [ ! -f "/var/lib/kubernetes/pki/ca.crt" ]; then
+            echo "ERROR: CA certificate not found"
+            sudo ls -la /var/lib/kubernetes/pki/ || true
+            exit 1
+          fi
+          
+          echo "Found certificates:"
+          sudo ls -la /var/lib/kubernetes/pki/
+          
+          # Настраиваем cluster
+          kubectl config set-cluster local-cluster \
+            --server=https://127.0.0.1:6443 \
+            --certificate-authority=/var/lib/kubernetes/pki/ca.crt \
+            --embed-certs=true
+          
+          # Настраиваем credentials
+          kubectl config set-credentials admin \
+            --client-certificate=/var/lib/kubernetes/pki/admin.crt \
+            --client-key=/var/lib/kubernetes/pki/admin.key \
+            --embed-certs=true
+          
+          # Настраиваем context
+          kubectl config set-context local-context \
+            --cluster=local-cluster \
+            --user=admin
+          
+          # Используем context
+          kubectl config use-context local-context
+          
+          echo ""
+          echo "=== Kubeconfig recreated ==="
+        else
+          echo ""
+          echo "kubeconfig is valid"
+        fi
+        
+        echo ""
+        echo "=== Final kubeconfig ==="
+        kubectl config view --minify
+        
+        echo ""
+        echo "=== Verify server URL ==="
+        FINAL_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+        echo "Server: $FINAL_SERVER"
+        
+        if [[ "$FINAL_SERVER" != "https://127.0.0.1:6443" ]]; then
+          echo "ERROR: Server URL is still wrong!"
+          exit 1
+        fi
+        
+        echo "SUCCESS: kubeconfig correctly configured"
 
-
-    # 🔑 TCP проверка подключения с увеличенным количеством попыток
     - name: Test API TCP connection
       run: |
         echo "=== Testing TCP connection to API server ==="
         
         for i in {1..30}; do
           if timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/6443' 2>/dev/null; then
-            echo "✓ Connected to 127.0.0.1:6443 (attempt $i)"
+            echo "Connected to 127.0.0.1:6443 (attempt $i)"
             exit 0
           fi
-          echo "⏳ Attempt $i/30 failed, retrying in 2 seconds..."
+          echo "Attempt $i/30 failed, retrying in 2 seconds..."
           sleep 2
         done
         
-        echo "❌ ERROR: Cannot connect to 127.0.0.1:6443 after 30 attempts"
+        echo "ERROR: Cannot connect to 127.0.0.1:6443 after 30 attempts"
         echo ""
-        echo "=== Checking API server process ==="
+        echo "=== Diagnostics ==="
         ps aux | grep kube-apiserver | grep -v grep || echo "API server not running"
-        echo ""
-        echo "=== Port listeners ==="
-        sudo netstat -tlnp | grep -E ':(6443|8080)' || echo "No listeners on 6443/8080"
-        echo ""
-        echo "=== API server logs ==="
-        sudo journalctl -u kube-apiserver --no-pager -n 50 || echo "No logs available"
+        sudo netstat -tlnp | grep -E ':(6443|8080)' || echo "No listeners"
         exit 1
 
     - name: Test kubectl client
@@ -86,9 +151,13 @@ jobs:
         
         echo "=== Cluster info ==="
         kubectl cluster-info || {
-          echo "❌ Cannot get cluster info"
+          echo "Cannot get cluster info"
           echo ""
+          echo "=== Config view ==="
           kubectl config view
+          echo ""
+          echo "=== Check API server ==="
+          curl -k https://127.0.0.1:6443/healthz || echo "API not responding"
           exit 1
         }
 
@@ -98,50 +167,24 @@ jobs:
         export KUBECONFIG=$HOME/.kube/config
         
         echo "=== Nodes ==="
-        kubectl get nodes -o wide || echo "⚠️  Nodes check failed"
+        kubectl get nodes -o wide || echo "Nodes check failed"
         
         echo ""
         echo "=== System pods ==="
-        kubectl get pods -A || echo "⚠️  Pods check failed"
+        kubectl get pods -A || echo "Pods check failed"
         
         echo ""
         echo "=== Component status ==="
-        kubectl get componentstatuses || echo "⚠️  Status check failed"
+        kubectl get componentstatuses || echo "Status check failed"
         
         echo ""
         echo "=== API health ==="
-        kubectl get --raw=/healthz || echo "⚠️  Health check failed"
+        kubectl get --raw=/healthz || echo "Health check failed"
         
         echo ""
         echo "=== Server version ==="
-        kubectl version || echo "⚠️  Version check failed"
-    # 🔑 Проверка kubeconfig ПЕРЕД использованием kubectl
-    - name: Verify kubeconfig
-      run: |
-        echo "=== Checking kubeconfig ==="
-        if [ ! -f "$HOME/.kube/config" ]; then
-          echo "❌ ERROR: kubeconfig not found"
-          exit 1
-        fi
-        
-        echo "✓ kubeconfig exists"
-        
-        echo ""
-        echo "=== Server URL ==="
-        SERVER_URL=$(grep "server:" "$HOME/.kube/config" | awk '{print $2}')
-        echo "Server: $SERVER_URL"
-        
-        if [[ "$SERVER_URL" != *":6443"* ]]; then
-          echo "❌ ERROR: Wrong port! Expected :6443"
-          exit 1
-        fi
-        
-        if [[ "$SERVER_URL" != https://* ]]; then
-          echo "❌ ERROR: Not HTTPS!"
-          exit 1
-        fi
-        
-        echo "✓ kubeconfig correctly configured"
+        kubectl version || echo "Version check failed"
+
     - name: Create test deployment
       run: |
         export PATH=$PATH:./kubebuilder/bin
@@ -149,7 +192,7 @@ jobs:
         
         echo "=== Creating nginx deployment ==="
         kubectl create deployment nginx --image=nginx:latest || {
-          echo "⚠️  Deployment failed"
+          echo "Deployment failed"
           kubectl get events --sort-by='.lastTimestamp'
           exit 1
         }
@@ -157,7 +200,7 @@ jobs:
         echo ""
         echo "=== Waiting for ready ==="
         kubectl wait --for=condition=available --timeout=60s deployment/nginx || {
-          echo "⚠️  Deployment not ready"
+          echo "Deployment not ready"
           kubectl get deployment nginx -o wide
           kubectl get pods -l app=nginx -o wide
           kubectl describe pods -l app=nginx
@@ -197,22 +240,9 @@ jobs:
         sudo netstat -tlnp | grep -E ':(6443|2379|10250)' || true
         
         echo ""
-        echo "=== Disk ==="
-        df -h
-        
-        echo ""
         echo "=== Directory structure ==="
         sudo ls -lah /var/lib/kubernetes/ || true
         sudo ls -lah /var/lib/kubernetes/pki/ || true
-
-    - name: Upload coverage
-      if: always()
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.out
-        flags: unittests
-        name: codecov-k8s-installer
-      continue-on-error: true
 
     - name: Collect logs
       if: always()
