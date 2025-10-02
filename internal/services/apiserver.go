@@ -6,8 +6,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -22,7 +24,7 @@ func (m *Manager) StartAPIServer() error {
 	if resp, err := client.Get(url); err == nil {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 200 && string(body) != "" {
+		if resp.StatusCode == 200 && strings.Contains(string(body), "health") {
 			etcdEndpoint = m.hostIP
 			log.Printf("  ✓ etcd доступен по %s:2379 (health-check ok), используем его", m.hostIP)
 		} else {
@@ -38,13 +40,13 @@ func (m *Manager) StartAPIServer() error {
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
 		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
 		"--service-cluster-ip-range=10.0.0.0/16",
-		"--bind-address=0.0.0.0",             // ✅ слушаем на всех интерфейсах
+		"--bind-address=0.0.0.0",             // слушаем на всех интерфейсах
 		"--secure-port=6443",
-		"--insecure-port=8080",               // для диагностики
-		"--insecure-bind-address=0.0.0.0",
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
+
 		"--authorization-mode=AlwaysAllow",
-		"--anonymous-auth=false",
+		"--anonymous-auth=true", // включаем, чтобы healthz был доступен без клиента
+
 		"--token-auth-file=/tmp/token.csv",
 		"--enable-priority-and-fairness=false",
 		"--allow-privileged=true",
@@ -83,34 +85,19 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
+	token := readBootstrapToken("/tmp/token.csv")
+
 	maxRetries := 300 // 10 минут
 	successCount := 0
-	requiredSuccesses := 3
+	required := 3
 
 	for i := 0; i < maxRetries; i++ {
-		urls := []string{
-			"https://127.0.0.1:6443/livez", // ✅ всегда проверяем localhost
-			"https://127.0.0.1:6443/readyz",
-			fmt.Sprintf("https://%s:6443/livez", m.hostIP),
-			"http://127.0.0.1:8080/healthz", // fallback для отладки
-		}
-
-		success := false
-		for _, url := range urls {
-			resp, err := client.Get(url)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == 200 {
-					success = true
-					break
-				}
-			}
-		}
-
-		if success {
+		if probeReadyz(client, "https://127.0.0.1:6443/readyz", token) ||
+			probeReadyz(client, fmt.Sprintf("https://%s:6443/readyz", m.hostIP), token) ||
+			probeReadyz(client, "https://127.0.0.1:6443/livez", token) {
 			successCount++
-			if successCount >= requiredSuccesses {
-				log.Printf("  ✓ API server is ready")
+			if successCount >= required {
+				log.Println("  ✓ API server is ready")
 				time.Sleep(3 * time.Second)
 				return nil
 			}
@@ -118,12 +105,61 @@ func (m *Manager) waitForAPIServer() error {
 			successCount = 0
 		}
 
-		if i%30 == 0 && i > 0 { // раз в минуту показываем прогресс
+		if i%30 == 0 && i > 0 {
 			log.Printf("  Still waiting... (%d/%d attempts, %d/%d consecutive successes)",
-				i, maxRetries, successCount, requiredSuccesses)
+				i, maxRetries, successCount, required)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
 	return fmt.Errorf("API server did not become ready in 10 minutes. Check: tail -100 /var/log/kubernetes/apiserver.log")
+}
+
+// probeReadyz выполняет HTTP-запрос, при необходимости с Bearer-токеном
+func probeReadyz(client *http.Client, url string, token string) bool {
+	if ok, code := doReq(client, url, ""); ok {
+		return true
+	} else if code == 401 || code == 403 {
+		if token != "" {
+			if ok, _ := doReq(client, url, "Bearer "+token); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func doReq(client *http.Client, url, auth string) (bool, int) {
+	req, _ := http.NewRequest("GET", url, nil)
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return true, resp.StatusCode
+	}
+	log.Printf("  probe %s -> HTTP %d", url, resp.StatusCode)
+	return false, resp.StatusCode
+}
+
+func readBootstrapToken(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	return ""
 }
