@@ -35,6 +35,7 @@ jobs:
     - name: Run installer
       run: |
         sudo ./k8s-installer -skip-api-wait -verbose
+        ls -la /
 
     - name: Wait for stabilization
       run: sleep 60
@@ -42,17 +43,54 @@ jobs:
     # Критичный шаг: проверяем и исправляем kubeconfig
     - name: Fix kubeconfig if needed
       run: |
+        # Добавляем kubectl в PATH
         export PATH=$PATH:./kubebuilder/bin
         
-        echo "=== Checking kubeconfig state ==="
+        echo "=== Checking kubeconfig in multiple locations ==="
         
-        if [ ! -f "$HOME/.kube/config" ]; then
-          echo "ERROR: kubeconfig file not found"
+        # Проверяем возможные пути
+        KUBECONFIG_PATHS=(
+          "$HOME/.kube/config"
+          "/root/.kube/config"
+          "/var/lib/kubernetes/kubeconfig"
+          "/var/lib/kubelet/kubeconfig"
+        )
+        
+        FOUND_CONFIG=""
+        for config_path in "${KUBECONFIG_PATHS[@]}"; do
+          if [ -f "$config_path" ]; then
+            echo "✓ Found kubeconfig at: $config_path"
+            ls -la "$config_path"
+            FOUND_CONFIG="$config_path"
+            
+            echo ""
+            echo "Content preview:"
+            sudo head -20 "$config_path" || cat "$config_path" 2>/dev/null || true
+            echo ""
+          else
+            echo "✗ Not found: $config_path"
+          fi
+        done
+        
+        if [ -z "$FOUND_CONFIG" ]; then
+          echo ""
+          echo "ERROR: No kubeconfig found in any expected location"
+          echo "Checking if installer created it elsewhere:"
+          sudo find /var/lib -name "config" -o -name "kubeconfig" 2>/dev/null || true
           exit 1
         fi
         
-        echo "Kubeconfig file exists, checking content:"
-        cat $HOME/.kube/config
+        echo ""
+        echo "=== Using kubeconfig from: $FOUND_CONFIG ==="
+        
+        # Копируем найденный конфиг в стандартное место
+        mkdir -p $HOME/.kube
+        if [ "$FOUND_CONFIG" != "$HOME/.kube/config" ]; then
+          echo "Copying kubeconfig to $HOME/.kube/config"
+          sudo cp "$FOUND_CONFIG" "$HOME/.kube/config"
+          sudo chown $(id -u):$(id -g) "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+        fi
         
         echo ""
         echo "=== Parsing server URL ==="
@@ -65,14 +103,14 @@ jobs:
           echo "WARNING: kubeconfig is invalid or empty, recreating..."
           
           # Проверяем наличие сертификатов
+          echo ""
+          echo "=== Checking certificates ==="
+          sudo ls -la /var/lib/kubernetes/pki/ || true
+          
           if [ ! -f "/var/lib/kubernetes/pki/ca.crt" ]; then
             echo "ERROR: CA certificate not found"
-            sudo ls -la /var/lib/kubernetes/pki/ || true
             exit 1
           fi
-          
-          echo "Found certificates:"
-          sudo ls -la /var/lib/kubernetes/pki/
           
           # Удаляем старый kubeconfig
           rm -f $HOME/.kube/config
@@ -84,10 +122,15 @@ jobs:
             --embed-certs=true
           
           # Настраиваем credentials
-          kubectl config set-credentials admin \
-            --client-certificate=/var/lib/kubernetes/pki/admin.crt \
-            --client-key=/var/lib/kubernetes/pki/admin.key \
-            --embed-certs=true
+          if [ -f "/var/lib/kubernetes/pki/admin.crt" ] && [ -f "/var/lib/kubernetes/pki/admin.key" ]; then
+            kubectl config set-credentials admin \
+              --client-certificate=/var/lib/kubernetes/pki/admin.crt \
+              --client-key=/var/lib/kubernetes/pki/admin.key \
+              --embed-certs=true
+          else
+            echo "WARNING: Admin certificates not found, configuring without client auth"
+            kubectl config set-credentials admin
+          fi
           
           # Настраиваем context
           kubectl config set-context local-context \
@@ -118,6 +161,7 @@ jobs:
           exit 1
         fi
         
+        echo ""
         echo "✓ SUCCESS: kubeconfig correctly configured"
 
     - name: Test API TCP connection
