@@ -3,6 +3,7 @@ package installer
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 
 	"github.com/dereban25/k8s-installer/internal/services"
@@ -85,5 +86,23 @@ func (i *Installer) Run() error {
 		log.Printf("✓ %s completed", step.name)
 	}
 
+	return nil
+}
+
+// Создание директорий (bin, etcd, manifests, cni)
+func (i *Installer) CreateDirectories() error {
+	dirs := []string{
+		filepath.Join(i.baseDir, "bin"),
+		filepath.Join(i.baseDir, "pki"),
+		i.etcdDataDir,
+		i.manifestsDir,
+		i.cniConfDir,
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return fmt.Errorf("failed to create dir %s: %w", d, err)
+		}
+		log.Printf("  Created: %s", d)
+	}
 	return nil
 }
