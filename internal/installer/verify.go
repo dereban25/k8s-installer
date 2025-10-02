@@ -43,14 +43,35 @@ func (i *Installer) TestAPIServerConnection() error {
 	}
 	
 	log.Println("  ✗ Failed to connect after all attempts")
-	log.Println("  Checking if API server process is running...")
+	log.Println("")
+	log.Println("=== Diagnostics ===")
 	
-	// Дополнительная диагностика
+	// Проверяем процесс
 	if exec.Command("pgrep", "kube-apiserver").Run() == nil {
 		log.Println("  ⚠️  API server process is running but not listening on port 6443")
-		log.Println("  This might be a timing issue - the API server may still be starting")
+		log.Println("  This might be a configuration or certificate issue")
+		
+		// Показываем логи если возможно
+		log.Println("")
+		log.Println("=== API Server Logs (last 30 lines) ===")
+		cmd := exec.Command("journalctl", "-u", "kube-apiserver", "--no-pager", "-n", "30")
+		if output, err := cmd.CombinedOutput(); err == nil {
+			log.Printf("%s", string(output))
+		} else {
+			// Пробуем через ps
+			log.Println("journalctl not available, showing process info:")
+			psCmd := exec.Command("ps", "aux")
+			if psOutput, err := psCmd.CombinedOutput(); err == nil {
+				lines := strings.Split(string(psOutput), "\n")
+				for _, line := range lines {
+					if strings.Contains(line, "kube-apiserver") {
+						log.Println(line)
+					}
+				}
+			}
+		}
 	} else {
-		log.Println("  ✗ API server process is not running")
+		log.Println("  ✗ API server process is not running at all")
 	}
 	
 	return fmt.Errorf("cannot establish TCP connection to API server after %d attempts", maxAttempts)
@@ -150,7 +171,7 @@ func (i *Installer) VerifyInstallation() error {
 		retryDelay  time.Duration
 	}{
 		{
-			args:       []string{"version", "--short"},
+			args:       []string{"version", "--client"},
 			name:       "kubectl version",
 			critical:   true,
 			retryCount: 3,
