@@ -10,6 +10,7 @@ on:
 jobs:
   setup-k8s:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     
     steps:
     - name: Checkout code
@@ -28,35 +29,175 @@ jobs:
 
     # - name: Run tests
     #   run: go test -v -race -coverprofile=coverage.out ./...
+    #   continue-on-error: true
 
     - name: Build binary
       run: |
         go build -v -o k8s-installer ./cmd/installer
         chmod +x k8s-installer
 
-    - name: Run installer (fast mode)
+    - name: Run installer
       run: |
         sudo ./k8s-installer -skip-api-wait -verbose
 
-    - name: Wait for components to stabilize
-      run: sleep 10
+    - name: Wait for stabilization
+      run: sleep 15
 
-    - name: Verify Kubernetes cluster
+    # 🔑 Проверка kubeconfig ПЕРЕД использованием kubectl
+    - name: Verify kubeconfig
+      run: |
+        echo "=== Checking kubeconfig ==="
+        if [ ! -f "$HOME/.kube/config" ]; then
+          echo "❌ ERROR: kubeconfig not found"
+          exit 1
+        fi
+        
+        echo "✓ kubeconfig exists"
+        
+        echo ""
+        echo "=== Server URL ==="
+        SERVER_URL=$(grep "server:" "$HOME/.kube/config" | awk '{print $2}')
+        echo "Server: $SERVER_URL"
+        
+        if [[ "$SERVER_URL" != *":6443"* ]]; then
+          echo "❌ ERROR: Wrong port! Expected :6443"
+          exit 1
+        fi
+        
+        if [[ "$SERVER_URL" != https://* ]]; then
+          echo "❌ ERROR: Not HTTPS!"
+          exit 1
+        fi
+        
+        echo "✓ kubeconfig correctly configured"
+
+    # 🔑 TCP проверка подключения
+    - name: Test API TCP connection
+      run: |
+        echo "=== Testing TCP connection to API server ==="
+        
+        for i in {1..10}; do
+          if timeout 3 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/6443' 2>/dev/null; then
+            echo "✓ Connected to 127.0.0.1:6443 (attempt $i)"
+            exit 0
+          fi
+          echo "⏳ Attempt $i/10 failed, retrying..."
+          sleep 3
+        done
+        
+        echo "❌ ERROR: Cannot connect to 127.0.0.1:6443"
+        echo ""
+        echo "=== Port listeners ==="
+        sudo netstat -tlnp | grep -E ':(6443|8080)'
+        exit 1
+
+    - name: Test kubectl client
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config   # 🔑 используем kubeconfig
-        kubectl get nodes || echo "Nodes check failed"
-        kubectl get pods -A || echo "Pods check failed"
-        kubectl version --client || echo "Version check failed"
+        export KUBECONFIG=$HOME/.kube/config
+        
+        echo "=== kubectl client version ==="
+        kubectl version --client
+
+    - name: Get cluster info
+      run: |
+        export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config
+        
+        echo "=== Cluster info ==="
+        kubectl cluster-info || {
+          echo "❌ Cannot get cluster info"
+          echo ""
+          kubectl config view
+          exit 1
+        }
+
+    - name: Verify cluster
+      run: |
+        export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config
+        
+        echo "=== Nodes ==="
+        kubectl get nodes -o wide || echo "⚠️  Nodes check failed"
+        
+        echo ""
+        echo "=== System pods ==="
+        kubectl get pods -A || echo "⚠️  Pods check failed"
+        
+        echo ""
+        echo "=== Component status ==="
+        kubectl get componentstatuses || echo "⚠️  Status check failed"
+        
+        echo ""
+        echo "=== API health ==="
+        kubectl get --raw=/healthz || echo "⚠️  Health check failed"
+        
+        echo ""
+        echo "=== Server version ==="
+        kubectl version || echo "⚠️  Version check failed"
 
     - name: Create test deployment
       run: |
         export PATH=$PATH:./kubebuilder/bin
-        export KUBECONFIG=$HOME/.kube/config   # 🔑 используем kubeconfig
-        kubectl create deployment nginx --image=nginx:latest || echo "Deployment creation failed"
-        sleep 15
-        kubectl get deployments || echo "Deployments check failed"
-        kubectl get pods || echo "Pods check failed"
+        export KUBECONFIG=$HOME/.kube/config
+        
+        echo "=== Creating nginx deployment ==="
+        kubectl create deployment nginx --image=nginx:latest || {
+          echo "⚠️  Deployment failed"
+          kubectl get events --sort-by='.lastTimestamp'
+          exit 1
+        }
+        
+        echo ""
+        echo "=== Waiting for ready ==="
+        kubectl wait --for=condition=available --timeout=60s deployment/nginx || {
+          echo "⚠️  Deployment not ready"
+          kubectl get deployment nginx -o wide
+          kubectl get pods -l app=nginx -o wide
+          kubectl describe pods -l app=nginx
+          exit 1
+        }
+        
+        echo ""
+        echo "=== Final status ==="
+        kubectl get deployments
+        kubectl get pods -l app=nginx -o wide
+
+    - name: Test service
+      run: |
+        export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config
+        
+        echo "=== Creating service ==="
+        kubectl expose deployment nginx --port=80 --type=NodePort
+        
+        echo ""
+        echo "=== Service details ==="
+        kubectl get svc nginx -o wide
+        kubectl describe svc nginx
+
+    - name: Diagnostics
+      if: always()
+      run: |
+        echo "=== System info ==="
+        uname -a
+        
+        echo ""
+        echo "=== Processes ==="
+        ps aux | grep -E 'kube|etcd|containerd' | grep -v grep || true
+        
+        echo ""
+        echo "=== Network ==="
+        sudo netstat -tlnp | grep -E ':(6443|2379|10250)' || true
+        
+        echo ""
+        echo "=== Disk ==="
+        df -h
+        
+        echo ""
+        echo "=== Directory structure ==="
+        sudo ls -lah /var/lib/kubernetes/ || true
+        sudo ls -lah /var/lib/kubernetes/pki/ || true
 
     - name: Upload coverage
       if: always()
@@ -67,17 +208,40 @@ jobs:
         name: codecov-k8s-installer
       continue-on-error: true
 
+    - name: Collect logs
+      if: always()
+      run: |
+        mkdir -p k8s-logs
+        
+        sudo journalctl -u kube-apiserver --no-pager > k8s-logs/apiserver.log 2>&1 || echo "No logs" > k8s-logs/apiserver.log
+        sudo journalctl -u kube-controller-manager --no-pager > k8s-logs/controller.log 2>&1 || echo "No logs" > k8s-logs/controller.log
+        sudo journalctl -u kube-scheduler --no-pager > k8s-logs/scheduler.log 2>&1 || echo "No logs" > k8s-logs/scheduler.log
+        sudo journalctl -u kubelet --no-pager > k8s-logs/kubelet.log 2>&1 || echo "No logs" > k8s-logs/kubelet.log
+        sudo journalctl -u etcd --no-pager > k8s-logs/etcd.log 2>&1 || echo "No logs" > k8s-logs/etcd.log
+        sudo journalctl -u containerd --no-pager > k8s-logs/containerd.log 2>&1 || echo "No logs" > k8s-logs/containerd.log
+        
+        if [ -d "/var/log/kubernetes" ]; then
+          sudo cp -r /var/log/kubernetes/* k8s-logs/ 2>&1 || true
+        fi
+        
+        cp "$HOME/.kube/config" k8s-logs/kubeconfig.yaml 2>&1 || true
+        
+        export PATH=$PATH:./kubebuilder/bin
+        export KUBECONFIG=$HOME/.kube/config
+        kubectl get all -A -o wide > k8s-logs/resources.txt 2>&1 || true
+        kubectl get events -A --sort-by='.lastTimestamp' > k8s-logs/events.txt 2>&1 || true
+        kubectl describe nodes > k8s-logs/nodes.txt 2>&1 || true
+
     - name: Upload logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: k8s-logs
-        path: /var/log/kubernetes/
+        path: k8s-logs/
         retention-days: 7
-      continue-on-error: true
 
     - name: Upload binary
-      if: always()
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: k8s-installer

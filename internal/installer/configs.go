@@ -3,14 +3,12 @@ package installer
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 )
 
-// --------------------------
-// Конфиги (как у тебя было)
-// --------------------------
-
+// CreateConfigurations создает все необходимые конфигурационные файлы
 func (i *Installer) CreateConfigurations() error {
 	if err := i.createCNIConfig(); err != nil {
 		return err
@@ -109,11 +107,7 @@ staticPodPath: "/etc/kubernetes/manifests"
 	return nil
 }
 
-// -------------------------------------
-// Конфигурация kubectl (аккуратный фикс)
-// -------------------------------------
-
-// маленький помощник: ждём появления любого из путей
+// Вспомогательные функции
 func waitForFirstExisting(timeout time.Duration, candidates ...string) (string, bool) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -129,15 +123,12 @@ func waitForFirstExisting(timeout time.Duration, candidates ...string) (string, 
 	}
 }
 
-// exists проверяет путь
 func exists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
 }
 
-// ConfigureKubectl создаёт kubeconfig в $HOME/.kube/config и копирует в kubeletDir/kubeconfig.
-// 1) Пытается использовать ca.crt + admin.crt/admin.key из i.baseDir/pki (или /etc/kubernetes/pki/* если так у тебя генерится);
-// 2) Если файлов пока нет — не падает, а настраивает кластер с --insecure-skip-tls-verify (чтобы пайплайн не разбивался).
+// ConfigureKubectl создает правильный kubeconfig с HTTPS на порту 6443
 func (i *Installer) ConfigureKubectl() error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -150,14 +141,21 @@ func (i *Installer) ConfigureKubectl() error {
 	}
 	kubeconfigPath := filepath.Join(kubeDir, "config")
 
-	// где лежит kubectl
+	// Определяем путь к kubectl
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 	if !exists(kubectlPath) {
-		// fallback на kubectl из PATH
 		kubectlPath = "kubectl"
 	}
 
-	// кандидаты для сертификатов (поддерживаем оба распространённых места)
+	// 🔑 КРИТИЧНО: Удаляем старый kubeconfig
+	if exists(kubeconfigPath) {
+		fmt.Println("⚠️  Removing old kubeconfig to prevent port 8080 fallback")
+		if err := os.Remove(kubeconfigPath); err != nil {
+			fmt.Printf("Warning: couldn't remove old kubeconfig: %v\n", err)
+		}
+	}
+
+	// Кандидаты для сертификатов
 	caCandidates := []string{
 		filepath.Join(i.baseDir, "pki", "ca.crt"),
 		"/etc/kubernetes/pki/ca.crt",
@@ -171,50 +169,82 @@ func (i *Installer) ConfigureKubectl() error {
 		"/etc/kubernetes/pki/admin.key",
 	}
 
-	// ждём CA чуть-чуть (на случай, если GenerateCertificates пишет асинхронно)
-	caPath, haveCA := waitForFirstExisting(2*time.Second, caCandidates...)
-	adminCrt, haveAdminCrt := waitForFirstExisting(0, adminCrtCandidates...)
-	adminKey, haveAdminKey := waitForFirstExisting(0, adminKeyCandidates...)
+	// Ждем сертификаты
+	fmt.Println("⏳ Waiting for certificates...")
+	caPath, haveCA := waitForFirstExisting(5*time.Second, caCandidates...)
+	adminCrt, haveAdminCrt := waitForFirstExisting(2*time.Second, adminCrtCandidates...)
+	adminKey, haveAdminKey := waitForFirstExisting(2*time.Second, adminKeyCandidates...)
 
-	// set-cluster
-	setClusterArgs := []string{"config", "set-cluster", "local-cluster", "--server=https://127.0.0.1:6443"}
-	if haveCA {
-		setClusterArgs = append(setClusterArgs, "--certificate-authority", caPath, "--embed-certs=true")
-	} else {
-		// аккуратный fallback: не роняем инсталлятор, но помечаем как insecure
-		setClusterArgs = append(setClusterArgs, "--insecure-skip-tls-verify=true")
+	if !haveCA {
+		return fmt.Errorf("CA certificate not found - cannot configure kubectl securely")
 	}
+
+	fmt.Printf("✓ Found CA certificate: %s\n", caPath)
+
+	// 1. set-cluster с ОБЯЗАТЕЛЬНЫМ указанием порта 6443 и CA
+	setClusterArgs := []string{
+		"config", "set-cluster", "local-cluster",
+		"--server=https://127.0.0.1:6443", // 🔑 Явно указываем порт 6443
+		"--certificate-authority", caPath,
+		"--embed-certs=true",
+	}
+	
+	fmt.Println("🔧 Configuring cluster endpoint...")
 	if err := runCommand(kubectlPath, setClusterArgs...); err != nil {
 		return fmt.Errorf("failed to configure cluster: %w", err)
 	}
 
-	// set-credentials
+	// 2. set-credentials
 	credArgs := []string{"config", "set-credentials", "admin"}
 	if haveAdminCrt && haveAdminKey {
-		credArgs = append(credArgs, "--client-certificate", adminCrt, "--client-key", adminKey, "--embed-certs=true")
+		fmt.Printf("✓ Found admin certificates\n")
+		credArgs = append(credArgs,
+			"--client-certificate", adminCrt,
+			"--client-key", adminKey,
+			"--embed-certs=true",
+		)
+	} else {
+		fmt.Println("⚠️  Admin certificates not found")
 	}
-	// Если админских ключей нет — создадим юзера без cred’ов (kubectl конфиг всё равно создаст).
+
 	if err := runCommand(kubectlPath, credArgs...); err != nil {
 		return fmt.Errorf("failed to configure credentials: %w", err)
 	}
 
-	// set-context / use-context
-	if err := runCommand(kubectlPath, "config", "set-context", "local-context", "--cluster=local-cluster", "--user=admin"); err != nil {
+	// 3. set-context
+	if err := runCommand(kubectlPath,
+		"config", "set-context", "local-context",
+		"--cluster=local-cluster",
+		"--user=admin",
+	); err != nil {
 		return fmt.Errorf("failed to set context: %w", err)
 	}
+
+	// 4. use-context
 	if err := runCommand(kubectlPath, "config", "use-context", "local-context"); err != nil {
 		return fmt.Errorf("failed to use context: %w", err)
 	}
 
-	// Скопируем kubeconfig для kubelet
-	b, err := os.ReadFile(kubeconfigPath)
+	// 5. Копируем kubeconfig для kubelet
+	kubeconfigData, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to read kubeconfig: %w", err)
 	}
+
 	kubeletKubeconfigPath := filepath.Join(i.kubeletDir, "kubeconfig")
-	if err := os.WriteFile(kubeletKubeconfigPath, b, 0644); err != nil {
+	if err := os.WriteFile(kubeletKubeconfigPath, kubeconfigData, 0644); err != nil {
 		return fmt.Errorf("failed to write kubelet kubeconfig: %w", err)
 	}
 
+	fmt.Println("✓ kubectl configuration completed")
+	return nil
+}
+
+func runCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
+	}
 	return nil
 }

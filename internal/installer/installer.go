@@ -9,7 +9,6 @@ import (
 	"github.com/dereban25/k8s-installer/internal/services"
 )
 
-// Централизованный справочник версий бинарей
 const (
 	ContainerdVersion  = "2.0.5"
 	RuncVersion        = "v1.2.6"
@@ -18,7 +17,6 @@ const (
 	CrictlVersion      = "v1.30.0"
 )
 
-// Installer управляет процессом установки Kubernetes
 type Installer struct {
 	config       *Config
 	baseDir      string
@@ -29,7 +27,6 @@ type Installer struct {
 	cniConfDir   string
 }
 
-// Config описывает параметры установки
 type Config struct {
 	K8sVersion      string
 	SkipDownload    bool
@@ -39,18 +36,15 @@ type Config struct {
 	Verbose         bool
 }
 
-// Конструктор: принимает только Config, возвращает Installer + error
 func New(cfg *Config) (*Installer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	// Дефолтные значения
 	baseDir := "/var/lib/kubernetes"
 	kubeletDir := "/var/lib/kubelet"
 	hostIP := "127.0.0.1"
 
-	// Можно переопределить через ENV
 	if v := os.Getenv("K8S_BASE_DIR"); v != "" {
 		baseDir = v
 	}
@@ -73,25 +67,29 @@ func New(cfg *Config) (*Installer, error) {
 	return inst, nil
 }
 
-// Запуск всего пайплайна установки
 func (i *Installer) Run() error {
 	steps := []struct {
 		name string
 		fn   func() error
 	}{
-		{"Creating directories", i.CreateDirectories}, // реализован в directories.go
+		{"Creating directories", i.CreateDirectories},
 		{"Downloading binaries", i.DownloadBinaries},
 		{"Generating certificates", i.GenerateCertificates},
 		{"Creating configurations", i.CreateConfigurations},
-		{"Configure kubectl", i.ConfigureKubectl}, // 🔑 добавили сюда
+		{"Configure kubectl", i.ConfigureKubectl},
 		{"Starting etcd", i.services.StartEtcd},
 		{"Starting API server", i.services.StartAPIServer},
+		{"Testing API connectivity", i.TestAPIServerConnection},
+		{"Verifying kubeconfig", i.VerifyKubeconfigSetup},
 		{"Starting containerd", i.services.StartContainerd},
 		{"Starting controller-manager", i.services.StartControllerManager},
 		{"Starting scheduler", i.services.StartScheduler},
 		{"Starting kubelet", i.services.StartKubelet},
+		{"Creating default resources", i.CreateDefaultResources},
+		{"Verifying installation", i.VerifyInstallation},
 	}
 
+	log.Println("🚀 Starting Kubernetes installation...")
 	for _, step := range steps {
 		log.Printf("=> %s...", step.name)
 		if err := step.fn(); err != nil {
@@ -104,5 +102,6 @@ func (i *Installer) Run() error {
 		log.Printf("✓ %s completed", step.name)
 	}
 
+	log.Println("✅ Kubernetes installation completed successfully!")
 	return nil
 }

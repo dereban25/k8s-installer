@@ -3,77 +3,221 @@ package installer
 import (
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
+// TestAPIServerConnection проверяет TCP-подключение к API server
+func (i *Installer) TestAPIServerConnection() error {
+	log.Println("🔍 Testing API server connectivity...")
+	
+	addresses := []string{
+		"127.0.0.1:6443",
+		"localhost:6443",
+	}
+	
+	for _, addr := range addresses {
+		log.Printf("  Trying %s...", addr)
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			log.Printf("  ✗ Failed: %v", err)
+			continue
+		}
+		conn.Close()
+		log.Printf("  ✓ Connected to %s", addr)
+		return nil
+	}
+	
+	return fmt.Errorf("cannot establish TCP connection to API server")
+}
+
+// VerifyKubeconfigSetup проверяет корректность kubeconfig
+func (i *Installer) VerifyKubeconfigSetup() error {
+	log.Println("🔍 Verifying kubeconfig...")
+	
+	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
+	
+	// Проверяем текущий контекст
+	cmd := exec.Command(kubectlPath, "config", "current-context")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get current context: %w\nOutput: %s", err, string(output))
+	}
+	log.Printf("  ✓ Current context: %s", strings.TrimSpace(string(output)))
+	
+	// Проверяем server URL
+	cmd = exec.Command(kubectlPath, "config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}")
+	output, err = cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get cluster server: %w", err)
+	}
+	
+	server := strings.TrimSpace(string(output))
+	log.Printf("  ✓ Cluster server: %s", server)
+	
+	if !strings.Contains(server, "6443") {
+		return fmt.Errorf("❌ kubeconfig uses wrong port! Expected 6443, got: %s", server)
+	}
+	
+	if !strings.HasPrefix(server, "https://") {
+		return fmt.Errorf("❌ kubeconfig uses insecure connection! Expected https://, got: %s", server)
+	}
+	
+	log.Println("  ✓ kubeconfig properly configured (HTTPS on port 6443)")
+	return nil
+}
+
 func (i *Installer) CreateDefaultResources() error {
+	log.Println("📦 Creating default resources...")
 	time.Sleep(5 * time.Second)
 
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 
-	// Create default service account
+	// Создаем default service account
 	if err := runCommandWithCheck(kubectlPath, "create", "sa", "default"); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
-			log.Printf("Warning: failed to create default SA: %v", err)
+			log.Printf("⚠️  Warning: failed to create default SA: %v", err)
+		} else {
+			log.Println("  ℹ️  Default service account already exists")
 		}
+	} else {
+		log.Println("  ✓ Created default service account")
 	}
 
-	// Create kube-root-ca configmap
+	// Создаем kube-root-ca configmap
+	caPath := filepath.Join(i.baseDir, "pki", "ca.crt")
 	if err := runCommandWithCheck(kubectlPath, "create", "configmap", "kube-root-ca.crt",
-		"--from-file=ca.crt=/tmp/ca.crt", "-n", "default"); err != nil {
+		fmt.Sprintf("--from-file=ca.crt=%s", caPath), "-n", "default"); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
-			log.Printf("Warning: failed to create configmap: %v", err)
+			log.Printf("⚠️  Warning: failed to create configmap: %v", err)
+		} else {
+			log.Println("  ℹ️  kube-root-ca.crt already exists")
 		}
+	} else {
+		log.Println("  ✓ Created kube-root-ca.crt configmap")
 	}
 
 	return nil
 }
 
 func (i *Installer) VerifyInstallation() error {
+	log.Println("🔍 Verifying installation...")
+	
+	// Проверяем TCP подключение
+	if err := i.TestAPIServerConnection(); err != nil {
+		return fmt.Errorf("API server connectivity test failed: %w", err)
+	}
+	
+	// Проверяем kubeconfig
+	if err := i.VerifyKubeconfigSetup(); err != nil {
+		return fmt.Errorf("kubeconfig verification failed: %w", err)
+	}
+	
 	time.Sleep(3 * time.Second)
 
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 
 	checks := []struct {
-		args []string
-		name string
+		args        []string
+		name        string
+		critical    bool
+		retryCount  int
+		retryDelay  time.Duration
 	}{
-		{[]string{"get", "nodes"}, "nodes"},
-		{[]string{"get", "componentstatuses"}, "component statuses"},
-		{[]string{"get", "--raw=/readyz?verbose"}, "API server health"},
+		{
+			args:       []string{"version", "--short"},
+			name:       "kubectl version",
+			critical:   true,
+			retryCount: 3,
+			retryDelay: 2 * time.Second,
+		},
+		{
+			args:       []string{"get", "--raw=/healthz"},
+			name:       "API health",
+			critical:   true,
+			retryCount: 5,
+			retryDelay: 3 * time.Second,
+		},
+		{
+			args:       []string{"get", "--raw=/readyz?verbose"},
+			name:       "API readiness",
+			critical:   false,
+			retryCount: 3,
+			retryDelay: 2 * time.Second,
+		},
+		{
+			args:       []string{"get", "nodes"},
+			name:       "nodes",
+			critical:   false,
+			retryCount: 3,
+			retryDelay: 2 * time.Second,
+		},
+		{
+			args:       []string{"get", "componentstatuses"},
+			name:       "component statuses",
+			critical:   false,
+			retryCount: 2,
+			retryDelay: 2 * time.Second,
+		},
+		{
+			args:       []string{"get", "pods", "-A"},
+			name:       "all pods",
+			critical:   false,
+			retryCount: 2,
+			retryDelay: 2 * time.Second,
+		},
 	}
 
+	allPassed := true
 	for _, check := range checks {
 		log.Printf("  Checking %s...", check.name)
 
-		cmd := exec.Command(kubectlPath, check.args...)
-		output, err := cmd.CombinedOutput()
-
-		if err != nil {
-			log.Printf("Warning: %s check failed: %v", check.name, err)
-			if i.config.Verbose {
-				log.Printf("Output: %s", string(output))
+		var lastErr error
+		var lastOutput []byte
+		
+		for attempt := 0; attempt <= check.retryCount; attempt++ {
+			if attempt > 0 {
+				log.Printf("    Retry %d/%d...", attempt, check.retryCount)
+				time.Sleep(check.retryDelay)
 			}
-		} else {
-			log.Printf("✓ %s check passed", check.name)
-			if i.config.Verbose {
-				log.Printf("%s:\n%s", check.name, string(output))
+			
+			cmd := exec.Command(kubectlPath, check.args...)
+			output, err := cmd.CombinedOutput()
+			
+			if err == nil {
+				log.Printf("  ✓ %s check passed", check.name)
+				if i.config.Verbose {
+					log.Printf("Output:\n%s", string(output))
+				}
+				break
+			}
+			
+			lastErr = err
+			lastOutput = output
+			
+			if attempt == check.retryCount {
+				if check.critical {
+					return fmt.Errorf("critical check '%s' failed: %w\nOutput: %s", 
+						check.name, lastErr, string(lastOutput))
+				}
+				log.Printf("  ✗ %s check failed: %v", check.name, lastErr)
+				if i.config.Verbose {
+					log.Printf("Output: %s", string(lastOutput))
+				}
+				allPassed = false
 			}
 		}
 	}
 
-	return nil
-}
-
-func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("command failed: %w, output: %s", err, output)
+	if !allPassed {
+		log.Println("⚠️  Some non-critical checks failed")
+	} else {
+		log.Println("✅ All checks passed!")
 	}
+
 	return nil
 }
 
@@ -81,7 +225,7 @@ func runCommandWithCheck(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%w: %s", err, output)
+		return fmt.Errorf("%w: %s", err, string(output))
 	}
 	return nil
 }
