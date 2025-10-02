@@ -16,11 +16,14 @@ const (
 )
 
 type Config struct {
-	K8sVersion   string
-	SkipDownload bool
-	SkipVerify   bool
-	Verbose      bool
+	K8sVersion       string
+	SkipDownload     bool
+	SkipVerify       bool
+	SkipAPIWait      bool
+	ContinueOnError  bool
+	Verbose          bool
 }
+
 
 type Installer struct {
 	config       *Config
