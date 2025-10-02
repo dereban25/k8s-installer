@@ -64,7 +64,9 @@ jobs:
         # Убиваем старые процессы containerd если есть
         sudo pkill -f containerd || true
         sudo pkill -f dockerd || true  # Убиваем docker если запущен
-        sleep 3
+        sudo systemctl stop docker || true  # Останавливаем docker service
+        sudo systemctl stop containerd || true  # Останавливаем containerd service
+        sleep 5
         
         # Проверяем что директории созданы правильно
         echo ""
@@ -153,10 +155,25 @@ jobs:
         echo "=== CRI test with retries ==="
         export PATH=$PATH:./kubebuilder/bin
         
+        # Проверяем права доступа к сокету
+        echo "Socket permissions:"
+        ls -la /run/containerd/containerd.sock
+        
+        # Пробуем исправить права если нужно
+        if [ ! -r "/run/containerd/containerd.sock" ]; then
+          echo "Fixing socket permissions..."
+          sudo chmod 666 /run/containerd/containerd.sock
+        fi
+        
         CRI_READY=false
         for i in {1..20}; do
-          if timeout 10 crictl --runtime-endpoint unix:///run/containerd/containerd.sock version >/dev/null 2>&1; then
-            echo "✓ CRI is responsive (attempt $i)"
+          # Используем sudo для crictl если права не позволяют
+          if timeout 10 sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock version >/dev/null 2>&1; then
+            echo "✓ CRI is responsive with sudo (attempt $i)"
+            CRI_READY=true
+            break
+          elif timeout 10 crictl --runtime-endpoint unix:///run/containerd/containerd.sock version >/dev/null 2>&1; then
+            echo "✓ CRI is responsive without sudo (attempt $i)"
             CRI_READY=true
             break
           else
@@ -168,15 +185,48 @@ jobs:
         if [ "$CRI_READY" = false ]; then
           echo "✗ CRI not responding after 60 seconds"
           echo ""
-          echo "=== Diagnostics ==="
-          echo "Last containerd logs:"
-          sudo tail -20 /var/log/kubernetes/containerd.log || echo "No logs"
+          echo "=== Extended Diagnostics ==="
+          
+          # Проверяем разные пути логов
+          echo "Looking for containerd logs in different locations:"
+          sudo find /var/log -name "*containerd*" 2>/dev/null || echo "No containerd log files found"
+          
+          # Проверяем systemd логи
           echo ""
-          echo "Socket test:"
-          ls -la /run/containerd/ || echo "Cannot list socket dir"
+          echo "Systemd containerd logs:"
+          sudo journalctl -u containerd --no-pager -n 20 2>/dev/null || echo "No systemd logs"
+          
+          # Проверяем наш кастомный путь
           echo ""
-          echo "Process test:"
-          ps aux | grep containerd | grep -v grep || echo "No containerd process"
+          echo "Custom log path:"
+          sudo ls -la /var/log/kubernetes/ 2>/dev/null || echo "Custom log dir doesn't exist"
+          if [ -f "/var/log/kubernetes/containerd.log" ]; then
+            echo "Custom containerd log (last 20 lines):"
+            sudo tail -20 /var/log/kubernetes/containerd.log
+          fi
+          
+          # Проверяем конфигурацию containerd
+          echo ""
+          echo "Containerd config:"
+          sudo cat /etc/containerd/config.toml 2>/dev/null || echo "No containerd config found"
+          
+          # Проверяем CRI плагины
+          echo ""
+          echo "Testing direct containerd connection:"
+          timeout 5 sudo ctr --address /run/containerd/containerd.sock version 2>/dev/null || echo "Direct connection failed"
+          
+          # Проверяем группы и права пользователя
+          echo ""
+          echo "User groups and permissions:"
+          groups
+          id
+          
+          # Проверяем конфликты с Docker
+          echo ""
+          echo "Docker status:"
+          systemctl is-active docker 2>/dev/null || echo "Docker service status unknown"
+          ps aux | grep docker | grep -v grep || echo "No docker processes"
+          
           exit 1
         fi
         
