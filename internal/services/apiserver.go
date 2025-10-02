@@ -36,30 +36,52 @@ func (m *Manager) StartAPIServer() error {
 			m.hostIP, err)
 	}
 
+	// Пути к сертификатам
+	pkiDir := filepath.Join(m.baseDir, "pki")
+	caCert := filepath.Join(pkiDir, "ca.crt")
+	apiServerCert := filepath.Join(pkiDir, "apiserver.crt")
+	apiServerKey := filepath.Join(pkiDir, "apiserver.key")
+	saKey := filepath.Join(pkiDir, "sa.key")
+	saPub := filepath.Join(pkiDir, "sa.pub")
+
+	// Создаем token file если его нет
+	tokenFile := filepath.Join(pkiDir, "token.csv")
+	if _, err := os.Stat(tokenFile); os.IsNotExist(err) {
+		// Создаем простой токен для bootstrap
+		tokenContent := "bootstrap-token-123456,system:bootstrap,10001,\"system:bootstrappers\"\n"
+		if err := os.WriteFile(tokenFile, []byte(tokenContent), 0600); err != nil {
+			log.Printf("  ⚠ Failed to create token file: %v", err)
+		}
+	}
+
 	cmd := exec.Command(
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
 		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
 		"--service-cluster-ip-range=10.0.0.0/16",
-		"--bind-address=0.0.0.0",             // слушаем на всех интерфейсах
+		"--bind-address=0.0.0.0",
 		"--secure-port=6443",
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
 
 		"--authorization-mode=AlwaysAllow",
-		"--anonymous-auth=true", // включаем, чтобы healthz был доступен без клиента
+		"--anonymous-auth=true",
 
-		"--token-auth-file=/tmp/token.csv",
+		// 🔑 ИСПРАВЛЕНО: используем правильные пути к сертификатам
+		fmt.Sprintf("--client-ca-file=%s", caCert),
+		fmt.Sprintf("--tls-cert-file=%s", apiServerCert),
+		fmt.Sprintf("--tls-private-key-file=%s", apiServerKey),
+		fmt.Sprintf("--service-account-key-file=%s", saPub),
+		fmt.Sprintf("--service-account-signing-key-file=%s", saKey),
+		fmt.Sprintf("--token-auth-file=%s", tokenFile),
+
+		"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
 		"--enable-priority-and-fairness=false",
 		"--allow-privileged=true",
 		"--profiling=false",
 		"--storage-backend=etcd3",
 		"--storage-media-type=application/json",
 		"--cert-dir=/var/run/kubernetes",
-		"--client-ca-file=/tmp/ca.crt",
-		"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
-		"--service-account-key-file=/tmp/sa.pub",
-		"--service-account-signing-key-file=/tmp/sa.key",
 		"--cloud-provider=external",
-		"--v=5", // подробные логи
+		"--v=5",
 	)
 
 	if err := m.startDaemon(cmd, "/var/log/kubernetes/apiserver.log"); err != nil {
@@ -85,7 +107,8 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
-	token := readBootstrapToken("/tmp/token.csv")
+	tokenFile := filepath.Join(m.baseDir, "pki", "token.csv")
+	token := readBootstrapToken(tokenFile)
 
 	maxRetries := 300 // 10 минут
 	successCount := 0
@@ -115,7 +138,6 @@ func (m *Manager) waitForAPIServer() error {
 	return fmt.Errorf("API server did not become ready in 10 minutes. Check: tail -100 /var/log/kubernetes/apiserver.log")
 }
 
-// probeReadyz выполняет HTTP-запрос, при необходимости с Bearer-токеном
 func probeReadyz(client *http.Client, url string, token string) bool {
 	if ok, code := doReq(client, url, ""); ok {
 		return true
@@ -142,7 +164,6 @@ func doReq(client *http.Client, url, auth string) (bool, int) {
 	if resp.StatusCode == 200 {
 		return true, resp.StatusCode
 	}
-	log.Printf("  probe %s -> HTTP %d", url, resp.StatusCode)
 	return false, resp.StatusCode
 }
 
