@@ -3,7 +3,7 @@ package installer
 import (
 	"fmt"
 	"log"
-
+	"os"
 	"path/filepath"
 
 	"github.com/dereban25/k8s-installer/internal/services"
@@ -29,6 +29,7 @@ type Installer struct {
 	cniConfDir   string
 }
 
+// Config описывает параметры установки
 type Config struct {
 	K8sVersion      string
 	SkipDownload    bool
@@ -38,10 +39,26 @@ type Config struct {
 	Verbose         bool
 }
 
-// Конструктор возвращает Installer + error
-func New(cfg *Config, baseDir, kubeletDir, hostIP string) (*Installer, error) {
+// Конструктор: принимает только Config, возвращает Installer + error
+func New(cfg *Config) (*Installer, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
+	}
+
+	// Дефолтные значения
+	baseDir := "/var/lib/kubernetes"
+	kubeletDir := "/var/lib/kubelet"
+	hostIP := "127.0.0.1"
+
+	// Можно переопределить через ENV
+	if v := os.Getenv("K8S_BASE_DIR"); v != "" {
+		baseDir = v
+	}
+	if v := os.Getenv("K8S_KUBELET_DIR"); v != "" {
+		kubeletDir = v
+	}
+	if v := os.Getenv("K8S_HOST_IP"); v != "" {
+		hostIP = v
 	}
 
 	inst := &Installer{
@@ -62,7 +79,7 @@ func (i *Installer) Run() error {
 		name string
 		fn   func() error
 	}{
-		{"Creating directories", i.CreateDirectories},
+		{"Creating directories", i.CreateDirectories}, // реализован в directories.go
 		{"Downloading binaries", i.DownloadBinaries},
 		{"Generating certificates", i.GenerateCertificates},
 		{"Creating configurations", i.CreateConfigurations},
@@ -88,4 +105,3 @@ func (i *Installer) Run() error {
 
 	return nil
 }
-
