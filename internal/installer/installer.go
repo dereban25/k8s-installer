@@ -3,7 +3,6 @@ package installer
 import (
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 
 	"github.com/dereban25/k8s-installer/internal/services"
