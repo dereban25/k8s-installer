@@ -40,14 +40,15 @@ func (i *Installer) DownloadBinaries() error {
 			destPath: filepath.Join(i.baseDir, "bin", "kube-scheduler"),
 			chmod:    true,
 		},
+		// ✅ containerd
 		{
-			url:      fmt.Sprintf("https://github.com/containerd/containerd/releases/download/v%s/containerd-static-%s-linux-amd64.tar.gz", ContainerdVersion, ContainerdVersion),
+			url:      fmt.Sprintf("https://github.com/containerd/containerd/releases/download/v%s/containerd-%s-linux-amd64.tar.gz", ContainerdVersion, ContainerdVersion),
 			destPath: "/tmp/containerd.tar.gz",
 			extract:  true,
 		},
 		{
 			url:      fmt.Sprintf("https://github.com/opencontainers/runc/releases/download/%s/runc.amd64", RuncVersion),
-			destPath: "/opt/cni/bin/runc",
+			destPath: filepath.Join(i.baseDir, "bin", "runc"),
 			chmod:    true,
 		},
 		{
@@ -73,7 +74,7 @@ func (i *Installer) DownloadBinaries() error {
 			if err := i.extractArchive(dl.destPath); err != nil {
 				return fmt.Errorf("failed to extract %s: %w", dl.destPath, err)
 			}
-			os.Remove(dl.destPath)
+			_ = os.Remove(dl.destPath)
 		}
 
 		if dl.chmod {
@@ -93,7 +94,8 @@ func (i *Installer) extractArchive(archivePath string) error {
 	case strings.Contains(archivePath, "kubebuilder-tools"):
 		cmd = exec.Command("tar", "-C", i.baseDir, "--strip-components=1", "-zxf", archivePath)
 	case strings.Contains(archivePath, "containerd"):
-		cmd = exec.Command("tar", "zxf", archivePath, "-C", "/opt/cni/")
+		// ✅ распаковываем bin/containerd внутрь baseDir/bin
+		cmd = exec.Command("tar", "-C", filepath.Join(i.baseDir, "bin"), "--strip-components=1", "-zxf", archivePath)
 	case strings.Contains(archivePath, "cni-plugins"):
 		cmd = exec.Command("tar", "zxf", archivePath, "-C", "/opt/cni/bin/")
 	case strings.Contains(archivePath, "crictl"):
@@ -106,6 +108,5 @@ func (i *Installer) extractArchive(archivePath string) error {
 	if err != nil {
 		return fmt.Errorf("extraction failed: %w, output: %s", err, output)
 	}
-
 	return nil
 }

@@ -16,7 +16,7 @@ func (m *Manager) StartContainerd() error {
 		"-c", "/etc/containerd/config.toml",
 	)
 
-	// расширяем PATH, чтобы точно находились crictl/ctr
+	// расширяем PATH, чтобы находились crictl/ctr
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH")+":"+filepath.Join(m.baseDir, "bin")+":/usr/local/bin:/usr/sbin",
 	)
@@ -38,12 +38,7 @@ func (m *Manager) waitForContainerd() error {
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		// проверяем процесс
-		if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err != nil && i%5 == 0 {
-			log.Println("  ⚠ containerd process not found yet")
-		}
-
-		// проверяем сокет
+		// проверка сокета
 		if _, err := os.Stat("/run/containerd/containerd.sock"); err == nil {
 			// 1. пробуем crictl
 			if _, err := exec.LookPath("crictl"); err == nil {
@@ -51,27 +46,23 @@ func (m *Manager) waitForContainerd() error {
 					"--runtime-endpoint", "unix:///run/containerd/containerd.sock", "version",
 				).Run() == nil {
 					log.Println("  ✓ Containerd is ready (crictl)")
-					time.Sleep(2 * time.Second)
 					return nil
 				}
 			}
-			// 2. fallback ctr
+			// 2. пробуем ctr
 			if _, err := exec.LookPath("ctr"); err == nil {
 				if exec.Command("ctr",
 					"--address", "/run/containerd/containerd.sock", "version",
 				).Run() == nil {
 					log.Println("  ✓ Containerd is ready (ctr)")
-					time.Sleep(2 * time.Second)
 					return nil
 				}
 			}
-			// 3. fallback по факту процесса + сокета
+			// 3. fallback — сокет есть, процесс жив
 			if _, err := exec.Command("pgrep", "-x", "containerd").Output(); err == nil && i > 5 {
 				log.Println("  ⚠ No crictl/ctr; socket present and process running — proceeding")
 				return nil
 			}
-		} else if i%5 == 0 {
-			log.Printf("  ⚠ containerd.sock not found yet: %v", err)
 		}
 
 		if i%10 == 0 && i > 0 {
@@ -80,5 +71,5 @@ func (m *Manager) waitForContainerd() error {
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("containerd did not become ready in %d seconds. Check: tail -100 /var/log/kubernetes/containerd.log", maxRetries)
+	return fmt.Errorf("containerd did not become ready in %d seconds. Check logs: tail -100 /var/log/kubernetes/containerd.log", maxRetries)
 }
