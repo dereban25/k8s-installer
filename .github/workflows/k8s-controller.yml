@@ -42,13 +42,16 @@ jobs:
     # Критичный шаг: проверяем и исправляем kubeconfig
     - name: Fix kubeconfig if needed
       run: |
+        export PATH=$PATH:./kubebuilder/bin
+        
         echo "=== Checking kubeconfig state ==="
         
         if [ ! -f "$HOME/.kube/config" ]; then
-          echo "ERROR: kubeconfig not found"
+          echo "ERROR: kubeconfig file not found"
           exit 1
         fi
         
+        echo "Kubeconfig file exists, checking content:"
         cat $HOME/.kube/config
         
         echo ""
@@ -61,8 +64,6 @@ jobs:
           echo ""
           echo "WARNING: kubeconfig is invalid or empty, recreating..."
           
-          export PATH=$PATH:./kubebuilder/bin
-          
           # Проверяем наличие сертификатов
           if [ ! -f "/var/lib/kubernetes/pki/ca.crt" ]; then
             echo "ERROR: CA certificate not found"
@@ -72,6 +73,9 @@ jobs:
           
           echo "Found certificates:"
           sudo ls -la /var/lib/kubernetes/pki/
+          
+          # Удаляем старый kubeconfig
+          rm -f $HOME/.kube/config
           
           # Настраиваем cluster
           kubectl config set-cluster local-cluster \
@@ -97,7 +101,7 @@ jobs:
           echo "=== Kubeconfig recreated ==="
         else
           echo ""
-          echo "kubeconfig is valid"
+          echo "✓ kubeconfig is valid"
         fi
         
         echo ""
@@ -114,7 +118,7 @@ jobs:
           exit 1
         fi
         
-        echo "SUCCESS: kubeconfig correctly configured"
+        echo "✓ SUCCESS: kubeconfig correctly configured"
 
     - name: Test API TCP connection
       run: |
