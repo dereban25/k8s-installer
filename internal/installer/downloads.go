@@ -18,14 +18,6 @@ type download struct {
 	chmod    bool
 }
 
-const (
-	ContainerdVersion  = "2.0.5"
-	RuncVersion        = "v1.2.6"
-	CNIPluginsVersion  = "v1.6.2"
-	KubebuilderVersion = "1.30.0"
-	CrictlVersion      = "v1.30.0"
-)
-
 func (i *Installer) DownloadBinaries() error {
 	downloads := []download{
 		{
