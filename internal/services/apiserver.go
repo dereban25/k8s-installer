@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -12,22 +11,10 @@ import (
 )
 
 func (m *Manager) StartAPIServer() error {
-	// Проверяем, доступен ли m.hostIP
-	etcdEndpoint := "127.0.0.1"
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:2379", m.hostIP), 500*time.Millisecond)
-	if err == nil {
-		// если коннектится — используем hostIP
-		_ = conn.Close()
-		etcdEndpoint = m.hostIP
-		log.Printf("  ✓ etcd доступен по %s:2379, используем его", m.hostIP)
-	} else {
-		log.Printf("  ⚠ etcd по %s:2379 недоступен, переключаемся на 127.0.0.1", m.hostIP)
-	}
-
 	cmd := exec.Command(
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
-		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
-		"--service-cluster-ip-range=10.0.0.0/16", // расширенный диапазон
+		fmt.Sprintf("--etcd-servers=http://%s:2379", m.hostIP),
+		"--service-cluster-ip-range=10.0.0.0/24",
 		"--bind-address=0.0.0.0",
 		"--secure-port=6443",
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
@@ -56,7 +43,8 @@ func (m *Manager) StartAPIServer() error {
 		return nil
 	}
 
-	log.Println("  Waiting for API server to become ready (may take up to 2 minutes)...")
+	log.Println("  Waiting for API server to become ready (this may take up to 3 minutes)...")
+	// Wait for API server to be ready
 	return m.waitForAPIServer()
 }
 
@@ -68,11 +56,12 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
-	maxRetries := 60 // 2 minutes
+	maxRetries := 120 // 4 минуты (120 * 2 секунды)
 	successCount := 0
-	requiredSuccesses := 3
+	requiredSuccesses := 5 // Требуем 5 успешных проверок подряд для стабильности
 
 	for i := 0; i < maxRetries; i++ {
+		// Проверяем по localhost и по hostIP
 		urls := []string{
 			"https://127.0.0.1:6443/livez",
 			"https://127.0.0.1:6443/readyz",
@@ -94,20 +83,25 @@ func (m *Manager) waitForAPIServer() error {
 		if success {
 			successCount++
 			if successCount >= requiredSuccesses {
-				log.Printf("  ✓ API server is ready")
-				time.Sleep(3 * time.Second)
+				log.Printf("  ✓ API server is ready and stable (verified %d times)", requiredSuccesses)
+				// Даем дополнительное время для полной инициализации всех компонентов
+				log.Println("  Waiting additional 5 seconds for full initialization...")
+				time.Sleep(5 * time.Second)
 				return nil
 			}
 		} else {
-			successCount = 0
+			successCount = 0 // Сбрасываем счетчик при неудаче
 		}
 
-		if i%10 == 0 && i > 0 {
-			log.Printf("  Still waiting... (%d/%d attempts, %d/%d consecutive successes)",
+		if i%15 == 0 && i > 0 {
+			log.Printf("  Still waiting for API server... (%d/%d attempts, %d/%d consecutive successes)", 
 				i, maxRetries, successCount, requiredSuccesses)
 		}
 		time.Sleep(2 * time.Second)
 	}
 
-	return fmt.Errorf("API server did not become ready. Check: tail -100 /var/log/kubernetes/apiserver.log")
+	return fmt.Errorf("API server did not become ready after %d seconds.\n"+
+		"The server may still be starting. Check logs:\n"+
+		"  sudo tail -100 /var/log/kubernetes/apiserver.log\n"+
+		"  sudo tail -100 /var/log/kubernetes/etcd.log", maxRetries*2)
 }
