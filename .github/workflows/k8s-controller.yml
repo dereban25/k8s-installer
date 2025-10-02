@@ -41,35 +41,9 @@ jobs:
         sudo ./k8s-installer -skip-api-wait -verbose
 
     - name: Wait for stabilization
-      run: sleep 15
+      run: sleep 60
 
-    # 🔑 Проверка kubeconfig ПЕРЕД использованием kubectl
-    - name: Verify kubeconfig
-      run: |
-        echo "=== Checking kubeconfig ==="
-        if [ ! -f "$HOME/.kube/config" ]; then
-          echo "❌ ERROR: kubeconfig not found"
-          exit 1
-        fi
-        
-        echo "✓ kubeconfig exists"
-        
-        echo ""
-        echo "=== Server URL ==="
-        SERVER_URL=$(grep "server:" "$HOME/.kube/config" | awk '{print $2}')
-        echo "Server: $SERVER_URL"
-        
-        if [[ "$SERVER_URL" != *":6443"* ]]; then
-          echo "❌ ERROR: Wrong port! Expected :6443"
-          exit 1
-        fi
-        
-        if [[ "$SERVER_URL" != https://* ]]; then
-          echo "❌ ERROR: Not HTTPS!"
-          exit 1
-        fi
-        
-        echo "✓ kubeconfig correctly configured"
+
 
     # 🔑 TCP проверка подключения с увеличенным количеством попыток
     - name: Test API TCP connection
@@ -141,7 +115,33 @@ jobs:
         echo ""
         echo "=== Server version ==="
         kubectl version || echo "⚠️  Version check failed"
-
+    # 🔑 Проверка kubeconfig ПЕРЕД использованием kubectl
+    - name: Verify kubeconfig
+      run: |
+        echo "=== Checking kubeconfig ==="
+        if [ ! -f "$HOME/.kube/config" ]; then
+          echo "❌ ERROR: kubeconfig not found"
+          exit 1
+        fi
+        
+        echo "✓ kubeconfig exists"
+        
+        echo ""
+        echo "=== Server URL ==="
+        SERVER_URL=$(grep "server:" "$HOME/.kube/config" | awk '{print $2}')
+        echo "Server: $SERVER_URL"
+        
+        if [[ "$SERVER_URL" != *":6443"* ]]; then
+          echo "❌ ERROR: Wrong port! Expected :6443"
+          exit 1
+        fi
+        
+        if [[ "$SERVER_URL" != https://* ]]; then
+          echo "❌ ERROR: Not HTTPS!"
+          exit 1
+        fi
+        
+        echo "✓ kubeconfig correctly configured"
     - name: Create test deployment
       run: |
         export PATH=$PATH:./kubebuilder/bin
