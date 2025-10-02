@@ -1,46 +1,30 @@
 package services
 
 import (
-	"fmt"
-	"os"
-	"os/exec"
+	"log"
 )
 
+// Manager управляет системными сервисами (etcd, api-server, containerd и т.д.)
 type Manager struct {
-	baseDir     string
-	kubeletDir  string
-	hostIP      string
-	skipAPIWait bool
+	baseDir    string
+	kubeletDir string
+	hostIP     string
+	verbose    bool
 }
 
-func NewManager(baseDir, kubeletDir, hostIP string, skipAPIWait bool) *Manager {
+// NewManager создаёт новый менеджер сервисов
+func NewManager(baseDir, kubeletDir, hostIP string, verbose bool) *Manager {
 	return &Manager{
-		baseDir:     baseDir,
-		kubeletDir:  kubeletDir,
-		hostIP:      hostIP,
-		skipAPIWait: skipAPIWait,
+		baseDir:    baseDir,
+		kubeletDir: kubeletDir,
+		hostIP:     hostIP,
+		verbose:    verbose,
 	}
 }
 
-func (m *Manager) startDaemon(cmd *exec.Cmd, logFile string) error {
-	logF, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to create log file: %w", err)
+// Лог-хелпер
+func (m *Manager) logf(format string, args ...interface{}) {
+	if m.verbose {
+		log.Printf(format, args...)
 	}
-
-	cmd.Stdout = logF
-	cmd.Stderr = logF
-
-	if err := cmd.Start(); err != nil {
-		logF.Close()
-		return fmt.Errorf("failed to start daemon: %w", err)
-	}
-
-	// Don't wait for the process to finish (it's a daemon)
-	go func() {
-		cmd.Wait()
-		logF.Close()
-	}()
-
-	return nil
 }
