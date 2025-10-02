@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// CreateConfigurations создает все необходимые конфигурационные файлы
 func (i *Installer) CreateConfigurations() error {
 	if err := i.createCNIConfig(); err != nil {
 		return err
@@ -46,30 +45,33 @@ func (i *Installer) createCNIConfig() error {
 }
 
 func (i *Installer) createContainerdConfig() error {
-	containerdConfig := `version = 3
+	// ИСПРАВЛЕНО: version 2 с правильной структурой для CRI
+	containerdConfig := `version = 2
 
 [grpc]
 address = "/run/containerd/containerd.sock"
+uid = 0
+gid = 0
 
-[plugins.'io.containerd.cri.v1.runtime']
-enable_selinux = false
-enable_unprivileged_ports = true
-enable_unprivileged_icmp = true
-device_ownership_from_security_context = false
+[debug]
+level = "info"
 
-[plugins.'io.containerd.cri.v1.images']
-snapshotter = "native"
-disable_snapshot_annotations = true
+[plugins."io.containerd.grpc.v1.cri"]
+sandbox_image = "registry.k8s.io/pause:3.10"
 
-[plugins.'io.containerd.cri.v1.runtime'.cni]
-bin_dir = "/opt/cni/bin"
-conf_dir = "/etc/cni/net.d"
+[plugins."io.containerd.grpc.v1.cri".containerd]
+snapshotter = "overlayfs"
+default_runtime_name = "runc"
 
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
 runtime_type = "io.containerd.runc.v2"
 
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
 SystemdCgroup = false
+
+[plugins."io.containerd.grpc.v1.cri".cni]
+bin_dir = "/opt/cni/bin"
+conf_dir = "/etc/cni/net.d"
 `
 	if err := os.WriteFile("/etc/containerd/config.toml", []byte(containerdConfig), 0644); err != nil {
 		return fmt.Errorf("failed to write containerd config: %w", err)
@@ -107,7 +109,6 @@ staticPodPath: "/etc/kubernetes/manifests"
 	return nil
 }
 
-// Вспомогательные функции
 func waitForFirstExisting(timeout time.Duration, candidates ...string) (string, bool) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -128,7 +129,6 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// ConfigureKubectl создает правильный kubeconfig с HTTPS на порту 6443
 func (i *Installer) ConfigureKubectl() error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -141,21 +141,17 @@ func (i *Installer) ConfigureKubectl() error {
 	}
 	kubeconfigPath := filepath.Join(kubeDir, "config")
 
-	// Определяем путь к kubectl
 	kubectlPath := filepath.Join(i.baseDir, "bin", "kubectl")
 	if !exists(kubectlPath) {
 		kubectlPath = "kubectl"
 	}
 
-	// 🔑 КРИТИЧНО: Удаляем старый kubeconfig
 	if exists(kubeconfigPath) {
-		fmt.Println("⚠️  Removing old kubeconfig to prevent port 8080 fallback")
 		if err := os.Remove(kubeconfigPath); err != nil {
 			fmt.Printf("Warning: couldn't remove old kubeconfig: %v\n", err)
 		}
 	}
 
-	// Кандидаты для сертификатов (проверяем оба варианта)
 	pkiDir := filepath.Join(i.baseDir, "pki")
 	caCandidates := []string{
 		filepath.Join(pkiDir, "ca.crt"),
@@ -173,8 +169,6 @@ func (i *Installer) ConfigureKubectl() error {
 		"/var/lib/kubernetes/pki/admin.key",
 	}
 
-	// Ждем сертификаты (увеличили timeout)
-	fmt.Println("⏳ Waiting for certificates...")
 	caPath, haveCA := waitForFirstExisting(10*time.Second, caCandidates...)
 	adminCrt, haveAdminCrt := waitForFirstExisting(5*time.Second, adminCrtCandidates...)
 	adminKey, haveAdminKey := waitForFirstExisting(5*time.Second, adminKeyCandidates...)
@@ -183,39 +177,30 @@ func (i *Installer) ConfigureKubectl() error {
 		return fmt.Errorf("CA certificate not found - cannot configure kubectl securely")
 	}
 
-	fmt.Printf("✓ Found CA certificate: %s\n", caPath)
-
-	// 1. set-cluster с ОБЯЗАТЕЛЬНЫМ указанием порта 6443 и CA
 	setClusterArgs := []string{
 		"config", "set-cluster", "local-cluster",
-		"--server=https://127.0.0.1:6443", // 🔑 Явно указываем порт 6443
+		"--server=https://127.0.0.1:6443",
 		"--certificate-authority", caPath,
 		"--embed-certs=true",
 	}
 	
-	fmt.Println("🔧 Configuring cluster endpoint...")
 	if err := runCommand(kubectlPath, setClusterArgs...); err != nil {
 		return fmt.Errorf("failed to configure cluster: %w", err)
 	}
 
-	// 2. set-credentials
 	credArgs := []string{"config", "set-credentials", "admin"}
 	if haveAdminCrt && haveAdminKey {
-		fmt.Printf("✓ Found admin certificates\n")
 		credArgs = append(credArgs,
 			"--client-certificate", adminCrt,
 			"--client-key", adminKey,
 			"--embed-certs=true",
 		)
-	} else {
-		fmt.Println("⚠️  Admin certificates not found")
 	}
 
 	if err := runCommand(kubectlPath, credArgs...); err != nil {
 		return fmt.Errorf("failed to configure credentials: %w", err)
 	}
 
-	// 3. set-context
 	if err := runCommand(kubectlPath,
 		"config", "set-context", "local-context",
 		"--cluster=local-cluster",
@@ -224,12 +209,10 @@ func (i *Installer) ConfigureKubectl() error {
 		return fmt.Errorf("failed to set context: %w", err)
 	}
 
-	// 4. use-context
 	if err := runCommand(kubectlPath, "config", "use-context", "local-context"); err != nil {
 		return fmt.Errorf("failed to use context: %w", err)
 	}
 
-	// 5. Копируем kubeconfig для kubelet
 	kubeconfigData, err := os.ReadFile(kubeconfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to read kubeconfig: %w", err)
@@ -240,7 +223,6 @@ func (i *Installer) ConfigureKubectl() error {
 		return fmt.Errorf("failed to write kubelet kubeconfig: %w", err)
 	}
 
-	fmt.Println("✓ kubectl configuration completed")
 	return nil
 }
 
