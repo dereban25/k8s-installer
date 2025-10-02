@@ -3,8 +3,8 @@ package services
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
-	"net"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -12,39 +12,52 @@ import (
 )
 
 func (m *Manager) StartAPIServer() error {
-	// Проверяем доступность m.hostIP:2379 (etcd)
+	// По умолчанию используем localhost
 	etcdEndpoint := "127.0.0.1"
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:2379", m.hostIP), 500*time.Millisecond)
-	if err == nil {
-		_ = conn.Close()
-		etcdEndpoint = m.hostIP
-		log.Printf("  ✓ etcd доступен по %s:2379, используем его", m.hostIP)
+
+	// Проверяем health API у etcd по hostIP
+	url := fmt.Sprintf("http://%s:2379/health", m.hostIP)
+	client := &http.Client{Timeout: 1 * time.Second}
+
+	if resp, err := client.Get(url); err == nil {
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == 200 && string(body) != "" {
+			etcdEndpoint = m.hostIP
+			log.Printf("  ✓ etcd доступен по %s:2379 (health-check ok), используем его", m.hostIP)
+		} else {
+			log.Printf("  ⚠ etcd health-check по %s:2379 вернул %d (%s), переключаемся на 127.0.0.1",
+				m.hostIP, resp.StatusCode, string(body))
+		}
 	} else {
-		log.Printf("  ⚠ etcd по %s:2379 недоступен, переключаемся на 127.0.0.1", m.hostIP)
+		log.Printf("  ⚠ etcd health-check по %s:2379 не прошёл (%v), переключаемся на 127.0.0.1",
+			m.hostIP, err)
 	}
 
 	cmd := exec.Command(
 		filepath.Join(m.baseDir, "bin", "kube-apiserver"),
 		fmt.Sprintf("--etcd-servers=http://%s:2379", etcdEndpoint),
-		"--service-cluster-ip-range=10.0.0.0/16", // расширенный диапазон
+		"--service-cluster-ip-range=10.0.0.0/16",
 		"--bind-address=0.0.0.0",
 		"--secure-port=6443",
+		"--insecure-port=8080",              // ✅ диагностика (curl http://127.0.0.1:8080/healthz)
+		"--insecure-bind-address=0.0.0.0",   // ✅ диагностика
 		fmt.Sprintf("--advertise-address=%s", m.hostIP),
 		"--authorization-mode=AlwaysAllow",
-		"--anonymous-auth=false", // запрещаем анонимные запросы
+		"--anonymous-auth=false",
 		"--token-auth-file=/tmp/token.csv",
 		"--enable-priority-and-fairness=false",
 		"--allow-privileged=true",
 		"--profiling=false",
 		"--storage-backend=etcd3",
 		"--storage-media-type=application/json",
-		"--cert-dir=/var/run/kubernetes",    // где будут лежать cert/key
-		"--client-ca-file=/tmp/ca.crt",      // CA для клиентов
+		"--cert-dir=/var/run/kubernetes",
+		"--client-ca-file=/tmp/ca.crt",
 		"--service-account-issuer=https://kubernetes.default.svc.cluster.local",
 		"--service-account-key-file=/tmp/sa.pub",
 		"--service-account-signing-key-file=/tmp/sa.key",
-		"--v=2",
 		"--cloud-provider=external",
+		"--v=5", // повышенный уровень логирования
 	)
 
 	if err := m.startDaemon(cmd, "/var/log/kubernetes/apiserver.log"); err != nil {
@@ -70,7 +83,7 @@ func (m *Manager) waitForAPIServer() error {
 		},
 	}
 
-	maxRetries := 300 // 10 минут (300 попыток × 2с)
+	maxRetries := 300 // 10 минут
 	successCount := 0
 	requiredSuccesses := 3
 
@@ -79,6 +92,7 @@ func (m *Manager) waitForAPIServer() error {
 			"https://127.0.0.1:6443/livez",
 			"https://127.0.0.1:6443/readyz",
 			fmt.Sprintf("https://%s:6443/livez", m.hostIP),
+			"http://127.0.0.1:8080/healthz", // ✅ для диагностики
 		}
 
 		success := false
@@ -104,7 +118,7 @@ func (m *Manager) waitForAPIServer() error {
 			successCount = 0
 		}
 
-		if i%30 == 0 && i > 0 { // раз в минуту пишем прогресс
+		if i%30 == 0 && i > 0 {
 			log.Printf("  Still waiting... (%d/%d attempts, %d/%d consecutive successes)",
 				i, maxRetries, successCount, requiredSuccesses)
 		}
