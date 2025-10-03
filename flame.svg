@@ -1,0 +1,2338 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="1958" onload="init(evt)" viewBox="0 0 1200 1958" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="1958.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="1941" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="1941" > </text>
+<g id="frames">
+<g >
+<title>ksys_write (80,808,080 samples, 3.69%)</title><rect x="999.7" y="1621" width="43.5" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="1002.68" y="1631.5" >ksys..</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="245" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="255.5" ></text>
+</g>
+<g >
+<title>check_heap_object (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1301" width="5.4" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="774.29" y="1311.5" ></text>
+</g>
+<g >
+<title>do_softirq (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1221" width="5.5" height="15.0" fill="rgb(223,87,20)" rx="2" ry="2" />
+<text  x="823.23" y="1231.5" ></text>
+</g>
+<g >
+<title>__irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1205" width="5.4" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="747.10" y="1215.5" ></text>
+</g>
+<g >
+<title>do_nanosleep (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1573" width="5.5" height="15.0" fill="rgb(253,220,52)" rx="2" ry="2" />
+<text  x="866.73" y="1583.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (191,919,190 samples, 8.76%)</title><rect x="1043.2" y="1685" width="103.3" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1046.18" y="1695.5" >do_syscall_64</text>
+</g>
+<g >
+<title>tcp_sendmsg_locked (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1477" width="21.7" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="828.67" y="1487.5" >t..</text>
+</g>
+<g >
+<title>x64_sys_call (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1589" width="21.7" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="828.67" y="1599.5" >x..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="741" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="751.5" >[k..</text>
+</g>
+<g >
+<title>[kube-apiserver] (505,050,500 samples, 23.04%)</title><rect x="575.5" y="1653" width="271.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="578.53" y="1663.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="197" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="207.5" ></text>
+</g>
+<g >
+<title>net_rx_action (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1189" width="10.9" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="834.11" y="1199.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (10,101,010 samples, 0.46%)</title><rect x="711.5" y="37" width="5.4" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="714.47" y="47.5" ></text>
+</g>
+<g >
+<title>__ip_finish_output (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1317" width="10.9" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="834.11" y="1327.5" ></text>
+</g>
+<g >
+<title>mem_cgroup_charge_skmem (10,101,010 samples, 0.46%)</title><rect x="820.2" y="917" width="5.5" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="823.23" y="927.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,161,616,150 samples, 53.00%)</title><rect x="417.8" y="1701" width="625.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="420.83" y="1711.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (10,101,010 samples, 0.46%)</title><rect x="716.9" y="181" width="5.5" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="719.91" y="191.5" ></text>
+</g>
+<g >
+<title>__ip_queue_xmit (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1381" width="10.9" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="834.11" y="1391.5" ></text>
+</g>
+<g >
+<title>tcp_push (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1445" width="21.8" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="806.92" y="1455.5" >t..</text>
+</g>
+<g >
+<title>fput (10,101,010 samples, 0.46%)</title><rect x="1130.2" y="1621" width="5.4" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1133.18" y="1631.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1829" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1187.56" y="1839.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (10,101,010 samples, 0.46%)</title><rect x="722.4" y="341" width="5.4" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="725.35" y="351.5" ></text>
+</g>
+<g >
+<title>sock_write_iter (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1509" width="27.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="801.48" y="1519.5" >s..</text>
+</g>
+<g >
+<title>__x64_sys_write (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1525" width="5.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="790.60" y="1535.5" ></text>
+</g>
+<g >
+<title>__schedule (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1541" width="5.5" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="866.73" y="1551.5" ></text>
+</g>
+<g >
+<title>inet6_sendmsg (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1493" width="27.2" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="801.48" y="1503.5" >i..</text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1557" width="5.5" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="796.04" y="1567.5" ></text>
+</g>
+<g >
+<title>simple_copy_to_iter (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1349" width="5.4" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="774.29" y="1359.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (40,404,040 samples, 1.84%)</title><rect x="706.0" y="389" width="21.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="399.5" >[..</text>
+</g>
+<g >
+<title>sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1237" width="5.4" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="747.10" y="1247.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (434,343,430 samples, 19.82%)</title><rect x="591.8" y="1621" width="233.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="594.84" y="1631.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>nf_hook_slow (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1317" width="5.4" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="790.60" y="1327.5" ></text>
+</g>
+<g >
+<title>tcp_recvmsg (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1413" width="5.5" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="779.73" y="1423.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_established (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1413" width="5.4" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="801.48" y="1423.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (737,373,730 samples, 33.64%)</title><rect x="477.6" y="1669" width="397.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="480.65" y="1679.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>run_rebalance_domains (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1173" width="5.4" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="747.10" y="1183.5" ></text>
+</g>
+<g >
+<title>__check_object_size.part.0 (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1317" width="5.5" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="779.73" y="1327.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_established (10,101,010 samples, 0.46%)</title><rect x="820.2" y="997" width="5.5" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="823.23" y="1007.5" ></text>
+</g>
+<g >
+<title>futex_wait (20,202,020 samples, 0.92%)</title><rect x="874.6" y="1589" width="10.9" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="877.61" y="1599.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (131,313,130 samples, 5.99%)</title><rect x="1059.5" y="1589" width="70.7" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="1062.49" y="1599.5" >schedul..</text>
+</g>
+<g >
+<title>__schedule (10,101,010 samples, 0.46%)</title><rect x="716.9" y="197" width="5.5" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="719.91" y="207.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1093" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1103.5" >[kube..</text>
+</g>
+<g >
+<title>futex_wait (40,404,040 samples, 1.84%)</title><rect x="967.1" y="1605" width="21.7" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="970.05" y="1615.5" >f..</text>
+</g>
+<g >
+<title>__napi_poll (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1173" width="10.9" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="834.11" y="1183.5" ></text>
+</g>
+<g >
+<title>tcp_recvmsg_locked (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1397" width="5.5" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="779.73" y="1407.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (111,111,110 samples, 5.07%)</title><rect x="668.0" y="1173" width="59.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="670.97" y="1183.5" >[kube-..</text>
+</g>
+<g >
+<title>process_backlog (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1157" width="10.9" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="834.11" y="1167.5" ></text>
+</g>
+<g >
+<title>do_futex (10,101,010 samples, 0.46%)</title><rect x="716.9" y="277" width="5.5" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="719.91" y="287.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (272,727,270 samples, 12.44%)</title><rect x="613.6" y="1525" width="146.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="616.59" y="1535.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>all (2,191,919,170 samples, 100%)</title><rect x="10.0" y="1909" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="1919.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1445" width="32.6" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="730.79" y="1455.5" >en..</text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="706.0" y="325" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="335.5" ></text>
+</g>
+<g >
+<title>read_tsc (10,101,010 samples, 0.46%)</title><rect x="1141.1" y="1637" width="5.4" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="1144.06" y="1647.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (50,505,050 samples, 2.30%)</title><rect x="874.6" y="1653" width="27.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="877.61" y="1663.5" >d..</text>
+</g>
+<g >
+<title>do_epoll_wait (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1365" width="32.6" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="730.79" y="1375.5" >do..</text>
+</g>
+<g >
+<title>task_work_run (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1621" width="5.4" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="904.80" y="1631.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (2,030,303,010 samples, 92.63%)</title><rect x="80.7" y="1861" width="1093.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="83.69" y="1871.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="722.4" y="325" width="5.4" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="725.35" y="335.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (40,404,040 samples, 1.84%)</title><rect x="706.0" y="373" width="21.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="383.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="213" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="223.5" ></text>
+</g>
+<g >
+<title>neigh_hh_output (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1285" width="10.9" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="834.11" y="1295.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (30,303,030 samples, 1.38%)</title><rect x="765.9" y="1557" width="16.3" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="768.85" y="1567.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1141" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1151.5" >[kube..</text>
+</g>
+<g >
+<title>sock_write_iter (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1477" width="5.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="790.60" y="1487.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (373,737,370 samples, 17.05%)</title><rect x="597.3" y="1605" width="201.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="600.28" y="1615.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>[kube-apiserver] (141,414,140 samples, 6.45%)</title><rect x="651.7" y="1397" width="76.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="654.66" y="1407.5" >[kube-ap..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="517" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="527.5" >[..</text>
+</g>
+<g >
+<title>tcp_mstamp_refresh (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1397" width="5.4" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="801.48" y="1407.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1285" width="5.5" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="823.23" y="1295.5" ></text>
+</g>
+<g >
+<title>irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1477" width="5.5" height="15.0" fill="rgb(254,227,54)" rx="2" ry="2" />
+<text  x="866.73" y="1487.5" ></text>
+</g>
+<g >
+<title>read_tsc (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1381" width="5.4" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="801.48" y="1391.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,747,474,730 samples, 79.72%)</title><rect x="232.9" y="1749" width="940.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="235.95" y="1759.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>futex_wait_queue (30,303,030 samples, 1.38%)</title><rect x="972.5" y="1573" width="16.3" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="975.49" y="1583.5" ></text>
+</g>
+<g >
+<title>tcp_data_queue (10,101,010 samples, 0.46%)</title><rect x="820.2" y="981" width="5.5" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="823.23" y="991.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (10,101,010 samples, 0.46%)</title><rect x="716.9" y="325" width="5.5" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="719.91" y="335.5" ></text>
+</g>
+<g >
+<title>nft_do_chain (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1285" width="5.4" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="790.60" y="1295.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1797" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1187.56" y="1807.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (30,303,030 samples, 1.38%)</title><rect x="706.0" y="357" width="16.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="367.5" ></text>
+</g>
+<g >
+<title>__x64_sys_futex (10,101,010 samples, 0.46%)</title><rect x="711.5" y="101" width="5.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="714.47" y="111.5" ></text>
+</g>
+<g >
+<title>irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1509" width="5.4" height="15.0" fill="rgb(254,227,54)" rx="2" ry="2" />
+<text  x="785.17" y="1519.5" ></text>
+</g>
+<g >
+<title>do_epoll_pwait.part.0 (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1589" width="5.4" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="855.86" y="1599.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (121,212,120 samples, 5.53%)</title><rect x="662.5" y="1301" width="65.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="665.53" y="1311.5" >[kube-a..</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (111,111,110 samples, 5.07%)</title><rect x="1070.4" y="1525" width="59.8" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1073.37" y="1535.5" >finish..</text>
+</g>
+<g >
+<title>__x64_sys_getrandom (10,101,010 samples, 0.46%)</title><rect x="760.4" y="1493" width="5.5" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="763.41" y="1503.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (50,505,050 samples, 2.30%)</title><rect x="727.8" y="1333" width="27.2" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="730.79" y="1343.5" >s..</text>
+</g>
+<g >
+<title>[kube-apiserver] (141,414,140 samples, 6.45%)</title><rect x="651.7" y="1413" width="76.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="654.66" y="1423.5" >[kube-ap..</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (10,101,010 samples, 0.46%)</title><rect x="1162.8" y="1573" width="5.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1165.81" y="1583.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (272,727,270 samples, 12.44%)</title><rect x="613.6" y="1509" width="146.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="616.59" y="1519.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>x64_sys_call (20,202,020 samples, 0.92%)</title><rect x="1146.5" y="1685" width="10.9" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1149.50" y="1695.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (272,727,270 samples, 12.44%)</title><rect x="613.6" y="1541" width="146.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="616.59" y="1551.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>tcp_data_ready (10,101,010 samples, 0.46%)</title><rect x="836.5" y="981" width="5.5" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="839.54" y="991.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1125" width="10.9" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="834.11" y="1135.5" ></text>
+</g>
+<g >
+<title>futex_wait_queue (10,101,010 samples, 0.46%)</title><rect x="874.6" y="1557" width="5.4" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="877.61" y="1567.5" ></text>
+</g>
+<g >
+<title>sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1525" width="5.4" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="785.17" y="1535.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (90,909,090 samples, 4.15%)</title><rect x="678.8" y="1045" width="49.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="681.85" y="1055.5" >[kub..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (191,919,190 samples, 8.76%)</title><rect x="1043.2" y="1701" width="103.3" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="1046.18" y="1711.5" >entry_SYSCAL..</text>
+</g>
+<g >
+<title>try_charge_memcg (10,101,010 samples, 0.46%)</title><rect x="820.2" y="901" width="5.5" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="823.23" y="911.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1093" width="10.9" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="834.11" y="1103.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="501" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="511.5" >[..</text>
+</g>
+<g >
+<title>inet6_recvmsg (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1429" width="5.4" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="774.29" y="1439.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="1173.7" y="1829" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1176.69" y="1839.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="1013" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="1023.5" >[ku..</text>
+</g>
+<g >
+<title>__x64_sys_read (20,202,020 samples, 0.92%)</title><rect x="771.3" y="1509" width="10.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="774.29" y="1519.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1541" width="5.4" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="790.60" y="1551.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (131,313,130 samples, 5.99%)</title><rect x="657.1" y="1349" width="70.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="660.10" y="1359.5" >[kube-a..</text>
+</g>
+<g >
+<title>futex_wait (10,101,010 samples, 0.46%)</title><rect x="765.9" y="1477" width="5.4" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="768.85" y="1487.5" ></text>
+</g>
+<g >
+<title>nft_match_large_eval (10,101,010 samples, 0.46%)</title><rect x="803.9" y="1269" width="5.5" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="806.92" y="1279.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1109" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1119.5" >[kube..</text>
+</g>
+<g >
+<title>__x64_sys_futex (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1685" width="10.9" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1165.81" y="1695.5" ></text>
+</g>
+<g >
+<title>futex_wait_queue (10,101,010 samples, 0.46%)</title><rect x="716.9" y="229" width="5.5" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="719.91" y="239.5" ></text>
+</g>
+<g >
+<title>ksys_read (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1653" width="5.5" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="1154.94" y="1663.5" ></text>
+</g>
+<g >
+<title>[unknown] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1861" width="5.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1187.56" y="1871.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,868,686,850 samples, 85.25%)</title><rect x="167.7" y="1797" width="1006.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="170.70" y="1807.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>__irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1461" width="5.5" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="866.73" y="1471.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (20,202,020 samples, 0.92%)</title><rect x="782.2" y="1573" width="10.8" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="785.17" y="1583.5" ></text>
+</g>
+<g >
+<title>futex_wait_queue (10,101,010 samples, 0.46%)</title><rect x="1162.8" y="1621" width="5.4" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="1165.81" y="1631.5" ></text>
+</g>
+<g >
+<title>__napi_poll (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1157" width="5.5" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="823.23" y="1167.5" ></text>
+</g>
+<g >
+<title>ep_poll (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1349" width="32.6" height="15.0" fill="rgb(238,151,36)" rx="2" ry="2" />
+<text  x="730.79" y="1359.5" >ep..</text>
+</g>
+<g >
+<title>__tcp_push_pending_frames (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1429" width="21.8" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="806.92" y="1439.5" >_..</text>
+</g>
+<g >
+<title>simple_copy_to_iter (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1349" width="5.5" height="15.0" fill="rgb(228,110,26)" rx="2" ry="2" />
+<text  x="779.73" y="1359.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (20,202,020 samples, 0.92%)</title><rect x="1146.5" y="1717" width="10.9" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="1149.50" y="1727.5" ></text>
+</g>
+<g >
+<title>__netif_receive_skb_one_core (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1109" width="5.5" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="823.23" y="1119.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (363,636,360 samples, 16.59%)</title><rect x="597.3" y="1589" width="195.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="600.28" y="1599.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>__netif_receive_skb (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1125" width="5.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="823.23" y="1135.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="725" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="735.5" >[k..</text>
+</g>
+<g >
+<title>vfs_write (80,808,080 samples, 3.69%)</title><rect x="999.7" y="1605" width="43.5" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="1002.68" y="1615.5" >vfs_..</text>
+</g>
+<g >
+<title>tcp_sendmsg_locked (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1461" width="21.8" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="806.92" y="1471.5" >t..</text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1557" width="5.5" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="866.73" y="1567.5" ></text>
+</g>
+<g >
+<title>__ip_local_out (30,303,030 samples, 1.38%)</title><rect x="803.9" y="1333" width="16.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="806.92" y="1343.5" ></text>
+</g>
+<g >
+<title>__seccomp_filter (20,202,020 samples, 0.92%)</title><rect x="912.7" y="1621" width="10.8" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="915.67" y="1631.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="821" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="831.5" >[k..</text>
+</g>
+<g >
+<title>apparmor_file_permission (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1461" width="5.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="796.04" y="1471.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="711.5" y="117" width="5.4" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="714.47" y="127.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (222,222,220 samples, 10.14%)</title><rect x="923.5" y="1653" width="119.7" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="926.55" y="1663.5" >x64_sys_call</text>
+</g>
+<g >
+<title>[[vdso]] (20,202,020 samples, 0.92%)</title><rect x="407.0" y="1701" width="10.8" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="409.96" y="1711.5" ></text>
+</g>
+<g >
+<title>__check_object_size (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1333" width="5.4" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="774.29" y="1343.5" ></text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (10,101,010 samples, 0.46%)</title><rect x="874.6" y="1509" width="5.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="877.61" y="1519.5" ></text>
+</g>
+<g >
+<title>futex_wait_setup (10,101,010 samples, 0.46%)</title><rect x="880.0" y="1557" width="5.5" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="883.05" y="1567.5" ></text>
+</g>
+<g >
+<title>nft_do_chain_ipv6 (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1301" width="5.4" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="790.60" y="1311.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1125" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1135.5" >[kube..</text>
+</g>
+<g >
+<title>[kube-apiserver] (272,727,270 samples, 12.44%)</title><rect x="613.6" y="1493" width="146.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="616.59" y="1503.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>ip6_xmit (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1333" width="5.4" height="15.0" fill="rgb(242,171,41)" rx="2" ry="2" />
+<text  x="790.60" y="1343.5" ></text>
+</g>
+<g >
+<title>ip_finish_output (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1317" width="5.5" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="823.23" y="1327.5" ></text>
+</g>
+<g >
+<title>kube-apiserver (2,191,919,170 samples, 100.00%)</title><rect x="10.0" y="1893" width="1180.0" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="13.00" y="1903.5" >kube-apiserver</text>
+</g>
+<g >
+<title>do_syscall_64 (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1717" width="10.9" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1165.81" y="1727.5" ></text>
+</g>
+<g >
+<title>__check_object_size.part.0 (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1317" width="5.4" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="774.29" y="1327.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="949" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="959.5" >[ku..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="645" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="655.5" >[..</text>
+</g>
+<g >
+<title>tcp_sendmsg (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1477" width="27.2" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="801.48" y="1487.5" >t..</text>
+</g>
+<g >
+<title>[kube-apiserver] (1,999,999,980 samples, 91.24%)</title><rect x="97.0" y="1829" width="1076.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="100.00" y="1839.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (40,404,040 samples, 1.84%)</title><rect x="727.8" y="1269" width="21.7" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="730.79" y="1279.5" >f..</text>
+</g>
+<g >
+<title>[kube-apiserver] (2,030,303,010 samples, 92.63%)</title><rect x="80.7" y="1845" width="1093.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="83.69" y="1855.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>__tcp_push_pending_frames (30,303,030 samples, 1.38%)</title><rect x="825.7" y="1445" width="16.3" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="828.67" y="1455.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (121,212,120 samples, 5.53%)</title><rect x="662.5" y="1285" width="65.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="665.53" y="1295.5" >[kube-a..</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1477" width="5.4" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="855.86" y="1487.5" ></text>
+</g>
+<g >
+<title>ktime_get_ts64 (10,101,010 samples, 0.46%)</title><rect x="755.0" y="1317" width="5.4" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="757.98" y="1327.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="917" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="927.5" >[k..</text>
+</g>
+<g >
+<title>vfs_write (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1493" width="5.4" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="790.60" y="1503.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (50,505,050 samples, 2.30%)</title><rect x="847.4" y="1637" width="27.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="850.42" y="1647.5" >d..</text>
+</g>
+<g >
+<title>do_epoll_wait (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1573" width="5.4" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="855.86" y="1583.5" ></text>
+</g>
+<g >
+<title>__schedule (10,101,010 samples, 0.46%)</title><rect x="874.6" y="1525" width="5.4" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="877.61" y="1535.5" ></text>
+</g>
+<g >
+<title>irqentry_exit_to_user_mode (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1637" width="5.4" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="904.80" y="1647.5" ></text>
+</g>
+<g >
+<title>__x64_sys_epoll_pwait (80,808,080 samples, 3.69%)</title><rect x="923.5" y="1637" width="43.6" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="926.55" y="1647.5" >__x6..</text>
+</g>
+<g >
+<title>__schedule (30,303,030 samples, 1.38%)</title><rect x="972.5" y="1541" width="16.3" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="975.49" y="1551.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="165" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="175.5" ></text>
+</g>
+<g >
+<title>__schedule (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1493" width="5.4" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="855.86" y="1503.5" ></text>
+</g>
+<g >
+<title>__schedule (50,505,050 samples, 2.30%)</title><rect x="939.9" y="1525" width="27.2" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="942.86" y="1535.5" >_..</text>
+</g>
+<g >
+<title>do_syscall_64 (30,303,030 samples, 1.38%)</title><rect x="765.9" y="1541" width="16.3" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="768.85" y="1551.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (10,101,010 samples, 0.46%)</title><rect x="711.5" y="133" width="5.4" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="714.47" y="143.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="706.0" y="309" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="319.5" ></text>
+</g>
+<g >
+<title>rw_verify_area (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1621" width="5.5" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="1154.94" y="1631.5" ></text>
+</g>
+<g >
+<title>_copy_to_iter (10,101,010 samples, 0.46%)</title><rect x="760.4" y="1477" width="5.5" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="763.41" y="1487.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="981" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="991.5" >[ku..</text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1541" width="5.4" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="855.86" y="1551.5" ></text>
+</g>
+<g >
+<title>__ip_queue_xmit (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1365" width="21.8" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="806.92" y="1375.5" >_..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="421" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="431.5" >[..</text>
+</g>
+<g >
+<title>do_syscall_64 (252,525,250 samples, 11.52%)</title><rect x="907.2" y="1669" width="136.0" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="910.24" y="1679.5" >do_syscall_64</text>
+</g>
+<g >
+<title>ip_queue_xmit (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1397" width="10.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="834.11" y="1407.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (60,606,060 samples, 2.76%)</title><rect x="934.4" y="1557" width="32.7" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="937.42" y="1567.5" >sc..</text>
+</g>
+<g >
+<title>[kube-apiserver] (2,030,303,010 samples, 92.63%)</title><rect x="80.7" y="1877" width="1093.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="83.69" y="1887.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1429" width="5.4" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="801.48" y="1439.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (20,202,020 samples, 0.92%)</title><rect x="782.2" y="1557" width="10.8" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="785.17" y="1567.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1445" width="5.5" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="866.73" y="1455.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="706.0" y="341" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="351.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (292,929,290 samples, 13.36%)</title><rect x="608.2" y="1557" width="157.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="611.16" y="1567.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (10,101,010 samples, 0.46%)</title><rect x="858.3" y="1541" width="5.4" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="861.29" y="1551.5" ></text>
+</g>
+<g >
+<title>__x64_sys_futex (10,101,010 samples, 0.46%)</title><rect x="716.9" y="293" width="5.5" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="719.91" y="303.5" ></text>
+</g>
+<g >
+<title>ksys_write (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1509" width="5.4" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="790.60" y="1519.5" ></text>
+</g>
+<g >
+<title>ksys_read (20,202,020 samples, 0.92%)</title><rect x="771.3" y="1493" width="10.9" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="774.29" y="1503.5" ></text>
+</g>
+<g >
+<title>__sk_mem_raise_allocated (10,101,010 samples, 0.46%)</title><rect x="820.2" y="933" width="5.5" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="823.23" y="943.5" ></text>
+</g>
+<g >
+<title>mem_cgroup_charge_skmem (10,101,010 samples, 0.46%)</title><rect x="842.0" y="1429" width="5.4" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="844.98" y="1439.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (10,101,010 samples, 0.46%)</title><rect x="836.5" y="949" width="5.5" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="839.54" y="959.5" ></text>
+</g>
+<g >
+<title>tcp_sendmsg (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1493" width="21.7" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="828.67" y="1503.5" >t..</text>
+</g>
+<g >
+<title>__x64_sys_read (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1541" width="5.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="796.04" y="1551.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (131,313,130 samples, 5.99%)</title><rect x="657.1" y="1317" width="70.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="660.10" y="1327.5" >[kube-a..</text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1045" width="5.5" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="823.23" y="1055.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (10,101,010 samples, 0.46%)</title><rect x="716.9" y="341" width="5.5" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="719.91" y="351.5" ></text>
+</g>
+<g >
+<title>__x64_sys_nanosleep (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1605" width="5.5" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="866.73" y="1615.5" ></text>
+</g>
+<g >
+<title>ksys_write (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1541" width="27.2" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="801.48" y="1551.5" >k..</text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (20,202,020 samples, 0.92%)</title><rect x="988.8" y="1573" width="10.9" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="991.80" y="1583.5" ></text>
+</g>
+<g >
+<title>__tcp_push_pending_frames (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1397" width="5.4" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="790.60" y="1407.5" ></text>
+</g>
+<g >
+<title>do_futex (50,505,050 samples, 2.30%)</title><rect x="874.6" y="1605" width="27.2" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="877.61" y="1615.5" >d..</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="229" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="239.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (252,525,250 samples, 11.52%)</title><rect x="907.2" y="1685" width="136.0" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="910.24" y="1695.5" >entry_SYSCALL_64_..</text>
+</g>
+<g >
+<title>[kube-apiserver] (141,414,140 samples, 6.45%)</title><rect x="651.7" y="1381" width="76.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="654.66" y="1391.5" >[kube-ap..</text>
+</g>
+<g >
+<title>vfs_read (20,202,020 samples, 0.92%)</title><rect x="771.3" y="1477" width="10.9" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="774.29" y="1487.5" ></text>
+</g>
+<g >
+<title>__tcp_transmit_skb (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1365" width="5.4" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="790.60" y="1375.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1189" width="5.5" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="823.23" y="1199.5" ></text>
+</g>
+<g >
+<title>fput (10,101,010 samples, 0.46%)</title><rect x="1146.5" y="1653" width="5.4" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1149.50" y="1663.5" ></text>
+</g>
+<g >
+<title>sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1669" width="5.4" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="904.80" y="1679.5" ></text>
+</g>
+<g >
+<title>irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1221" width="5.4" height="15.0" fill="rgb(254,227,54)" rx="2" ry="2" />
+<text  x="747.10" y="1231.5" ></text>
+</g>
+<g >
+<title>do_epoll_pwait.part.0 (80,808,080 samples, 3.69%)</title><rect x="923.5" y="1621" width="43.6" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="926.55" y="1631.5" >do_e..</text>
+</g>
+<g >
+<title>__netif_receive_skb (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1141" width="10.9" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="834.11" y="1151.5" ></text>
+</g>
+<g >
+<title>do_futex (60,606,060 samples, 2.76%)</title><rect x="967.1" y="1621" width="32.6" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="970.05" y="1631.5" >do..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="885" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="895.5" >[k..</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1781" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1187.56" y="1791.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1589" width="27.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="801.48" y="1599.5" >d..</text>
+</g>
+<g >
+<title>__secure_computing (20,202,020 samples, 0.92%)</title><rect x="912.7" y="1637" width="10.8" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="915.67" y="1647.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="693" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="703.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="997" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="1007.5" >[ku..</text>
+</g>
+<g >
+<title>tcp_try_rmem_schedule (10,101,010 samples, 0.46%)</title><rect x="820.2" y="965" width="5.5" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="823.23" y="975.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1413" width="32.6" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="730.79" y="1423.5" >x6..</text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1813" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1187.56" y="1823.5" ></text>
+</g>
+<g >
+<title>nf_nat_ipv4_local_fn (20,202,020 samples, 0.92%)</title><rect x="809.4" y="1317" width="10.8" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="812.35" y="1327.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="901" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="911.5" >[k..</text>
+</g>
+<g >
+<title>update_blocked_averages (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1413" width="5.5" height="15.0" fill="rgb(240,163,38)" rx="2" ry="2" />
+<text  x="866.73" y="1423.5" ></text>
+</g>
+<g >
+<title>sock_write_iter (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1525" width="21.7" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="828.67" y="1535.5" >s..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1253" width="5.5" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="823.23" y="1263.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (111,111,110 samples, 5.07%)</title><rect x="668.0" y="1221" width="59.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="670.97" y="1231.5" >[kube-..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="805" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="815.5" >[k..</text>
+</g>
+<g >
+<title>apparmor_file_permission (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1589" width="5.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="1154.94" y="1599.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="261" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="271.5" ></text>
+</g>
+<g >
+<title>__local_bh_enable_ip (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1237" width="5.5" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="823.23" y="1247.5" ></text>
+</g>
+<g >
+<title>tcp_rcv_established (10,101,010 samples, 0.46%)</title><rect x="836.5" y="1013" width="5.5" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="839.54" y="1023.5" ></text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1525" width="5.5" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="866.73" y="1535.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1541" width="5.4" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="785.17" y="1551.5" ></text>
+</g>
+<g >
+<title>futex_wake (10,101,010 samples, 0.46%)</title><rect x="711.5" y="69" width="5.4" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="714.47" y="79.5" ></text>
+</g>
+<g >
+<title>sock_def_readable (10,101,010 samples, 0.46%)</title><rect x="836.5" y="965" width="5.5" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="839.54" y="975.5" ></text>
+</g>
+<g >
+<title>__futex_wait (10,101,010 samples, 0.46%)</title><rect x="716.9" y="245" width="5.5" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="719.91" y="255.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="453" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="463.5" >[..</text>
+</g>
+<g >
+<title>ip_output (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1349" width="10.9" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="834.11" y="1359.5" ></text>
+</g>
+<g >
+<title>[unknown] (30,303,030 samples, 1.38%)</title><rect x="1173.7" y="1877" width="16.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1176.69" y="1887.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1509" width="5.5" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="866.73" y="1519.5" ></text>
+</g>
+<g >
+<title>tcp_write_xmit (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1381" width="5.4" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="790.60" y="1391.5" ></text>
+</g>
+<g >
+<title>__sk_mem_schedule (10,101,010 samples, 0.46%)</title><rect x="820.2" y="949" width="5.5" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="823.23" y="959.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="757" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="767.5" >[k..</text>
+</g>
+<g >
+<title>tcp_data_queue (10,101,010 samples, 0.46%)</title><rect x="836.5" y="997" width="5.5" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="839.54" y="1007.5" ></text>
+</g>
+<g >
+<title>tcp_recvmsg (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1413" width="5.4" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="774.29" y="1423.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (30,303,030 samples, 1.38%)</title><rect x="765.9" y="1525" width="16.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="768.85" y="1535.5" ></text>
+</g>
+<g >
+<title>__x64_sys_epoll_pwait (181,818,180 samples, 8.29%)</title><rect x="1048.6" y="1653" width="97.9" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="1051.62" y="1663.5" >__x64_sys_e..</text>
+</g>
+<g >
+<title>schedule_debug.constprop.0 (10,101,010 samples, 0.46%)</title><rect x="749.5" y="1269" width="5.5" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="752.54" y="1279.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,797,979,780 samples, 82.03%)</title><rect x="205.8" y="1781" width="967.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="208.76" y="1791.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="837" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="847.5" >[k..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (50,505,050 samples, 2.30%)</title><rect x="847.4" y="1653" width="27.2" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="850.42" y="1663.5" >e..</text>
+</g>
+<g >
+<title>[kube-apiserver] (151,515,150 samples, 6.91%)</title><rect x="646.2" y="1445" width="81.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="649.22" y="1455.5" >[kube-api..</text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="874.6" y="1541" width="5.4" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="877.61" y="1551.5" ></text>
+</g>
+<g >
+<title>nft_do_chain (10,101,010 samples, 0.46%)</title><rect x="803.9" y="1285" width="5.5" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="806.92" y="1295.5" ></text>
+</g>
+<g >
+<title>__skb_datagram_iter (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1365" width="5.5" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="779.73" y="1375.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1013" width="5.5" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="823.23" y="1023.5" ></text>
+</g>
+<g >
+<title>sock_read_iter (20,202,020 samples, 0.92%)</title><rect x="771.3" y="1461" width="10.9" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="774.29" y="1471.5" ></text>
+</g>
+<g >
+<title>futex_wake (20,202,020 samples, 0.92%)</title><rect x="988.8" y="1605" width="10.9" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="991.80" y="1615.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (131,313,130 samples, 5.99%)</title><rect x="657.1" y="1333" width="70.7" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="660.10" y="1343.5" >[kube-a..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="773" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="783.5" >[k..</text>
+</g>
+<g >
+<title>inet_recvmsg (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1429" width="5.5" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="779.73" y="1439.5" ></text>
+</g>
+<g >
+<title>wake_up_q (10,101,010 samples, 0.46%)</title><rect x="858.3" y="1557" width="5.4" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="861.29" y="1567.5" ></text>
+</g>
+<g >
+<title>do_epoll_wait (80,808,080 samples, 3.69%)</title><rect x="923.5" y="1605" width="43.6" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="926.55" y="1615.5" >do_e..</text>
+</g>
+<g >
+<title>x64_sys_call (40,404,040 samples, 1.84%)</title><rect x="852.9" y="1621" width="21.7" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="855.86" y="1631.5" >x..</text>
+</g>
+<g >
+<title>hrtimer_nanosleep (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1589" width="5.5" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="866.73" y="1599.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1029" width="5.5" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="823.23" y="1039.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="469" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="479.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (343,434,340 samples, 15.67%)</title><rect x="597.3" y="1573" width="184.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="600.28" y="1583.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>net_rx_action (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1173" width="5.5" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="823.23" y="1183.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="711.5" y="181" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="714.47" y="191.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="760.4" y="1509" width="5.5" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="763.41" y="1519.5" ></text>
+</g>
+<g >
+<title>__x64_sys_read (20,202,020 samples, 0.92%)</title><rect x="1146.5" y="1669" width="10.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="1149.50" y="1679.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="706.0" y="277" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="287.5" ></text>
+</g>
+<g >
+<title>inet_sendmsg (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1509" width="21.7" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="828.67" y="1519.5" >i..</text>
+</g>
+<g >
+<title>vfs_write (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1541" width="21.7" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="828.67" y="1551.5" >v..</text>
+</g>
+<g >
+<title>handle_softirqs (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1477" width="5.4" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="785.17" y="1487.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (10,101,010 samples, 0.46%)</title><rect x="1184.6" y="1845" width="5.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1187.56" y="1855.5" ></text>
+</g>
+<g >
+<title>__x64_sys_futex (10,101,010 samples, 0.46%)</title><rect x="765.9" y="1509" width="5.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="768.85" y="1519.5" ></text>
+</g>
+<g >
+<title>update_blocked_averages (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1157" width="5.4" height="15.0" fill="rgb(240,163,38)" rx="2" ry="2" />
+<text  x="747.10" y="1167.5" ></text>
+</g>
+<g >
+<title>futex_wake (30,303,030 samples, 1.38%)</title><rect x="885.5" y="1589" width="16.3" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="888.48" y="1599.5" ></text>
+</g>
+<g >
+<title>select_estimate_accuracy (10,101,010 samples, 0.46%)</title><rect x="755.0" y="1333" width="5.4" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="757.98" y="1343.5" ></text>
+</g>
+<g >
+<title>__irq_exit_rcu (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1493" width="5.4" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="785.17" y="1503.5" ></text>
+</g>
+<g >
+<title>nft_match_eval (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1269" width="5.4" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="790.60" y="1279.5" ></text>
+</g>
+<g >
+<title>ksys_read (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1525" width="5.5" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="796.04" y="1535.5" ></text>
+</g>
+<g >
+<title>eventfd_write (70,707,070 samples, 3.23%)</title><rect x="999.7" y="1589" width="38.0" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="1002.68" y="1599.5" >eve..</text>
+</g>
+<g >
+<title>__tcp_transmit_skb (30,303,030 samples, 1.38%)</title><rect x="825.7" y="1413" width="16.3" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="828.67" y="1423.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="629" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="639.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="1173.7" y="1845" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1176.69" y="1855.5" ></text>
+</g>
+<g >
+<title>aa_file_perm (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1573" width="5.5" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="1154.94" y="1583.5" ></text>
+</g>
+<g >
+<title>__schedule (50,505,050 samples, 2.30%)</title><rect x="727.8" y="1285" width="27.2" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="730.79" y="1295.5" >_..</text>
+</g>
+<g >
+<title>sk_forced_mem_schedule (10,101,010 samples, 0.46%)</title><rect x="842.0" y="1445" width="5.4" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="844.98" y="1455.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1573" width="5.5" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="796.04" y="1583.5" ></text>
+</g>
+<g >
+<title>syscall_exit_to_user_mode_prepare (10,101,010 samples, 0.46%)</title><rect x="907.2" y="1653" width="5.5" height="15.0" fill="rgb(235,142,34)" rx="2" ry="2" />
+<text  x="910.24" y="1663.5" ></text>
+</g>
+<g >
+<title>neigh_hh_output (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1269" width="5.5" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="823.23" y="1279.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (20,202,020 samples, 0.92%)</title><rect x="1059.5" y="1557" width="10.9" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1062.49" y="1567.5" ></text>
+</g>
+<g >
+<title>tcp_write_xmit (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1413" width="21.8" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="806.92" y="1423.5" >t..</text>
+</g>
+<g >
+<title>tcp_sendmsg (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1445" width="5.4" height="15.0" fill="rgb(223,83,19)" rx="2" ry="2" />
+<text  x="790.60" y="1455.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,505,050,490 samples, 68.66%)</title><rect x="336.3" y="1717" width="810.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="339.27" y="1727.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="597" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="607.5" >[..</text>
+</g>
+<g >
+<title>irqentry_exit (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1653" width="5.4" height="15.0" fill="rgb(219,66,15)" rx="2" ry="2" />
+<text  x="904.80" y="1663.5" ></text>
+</g>
+<g >
+<title>wake_up_q (30,303,030 samples, 1.38%)</title><rect x="885.5" y="1573" width="16.3" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="888.48" y="1583.5" ></text>
+</g>
+<g >
+<title>futex_wait (10,101,010 samples, 0.46%)</title><rect x="716.9" y="261" width="5.5" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="719.91" y="271.5" ></text>
+</g>
+<g >
+<title>nf_hook_slow (10,101,010 samples, 0.46%)</title><rect x="803.9" y="1317" width="5.5" height="15.0" fill="rgb(243,175,42)" rx="2" ry="2" />
+<text  x="806.92" y="1327.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (50,505,050 samples, 2.30%)</title><rect x="874.6" y="1637" width="27.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="877.61" y="1647.5" >x..</text>
+</g>
+<g >
+<title>ip_queue_xmit (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1381" width="21.8" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="806.92" y="1391.5" >i..</text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (30,303,030 samples, 1.38%)</title><rect x="972.5" y="1525" width="16.3" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="975.49" y="1535.5" ></text>
+</g>
+<g >
+<title>__schedule (111,111,110 samples, 5.07%)</title><rect x="1070.4" y="1541" width="59.8" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="1073.37" y="1551.5" >__sche..</text>
+</g>
+<g >
+<title>inet6_sendmsg (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1461" width="5.4" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="790.60" y="1471.5" ></text>
+</g>
+<g >
+<title>release_sock (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1461" width="5.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="801.48" y="1471.5" ></text>
+</g>
+<g >
+<title>tcp_v4_do_rcv (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1029" width="10.9" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="834.11" y="1039.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (111,111,110 samples, 5.07%)</title><rect x="668.0" y="1189" width="59.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="670.97" y="1199.5" >[kube-..</text>
+</g>
+<g >
+<title>futex_q_lock (10,101,010 samples, 0.46%)</title><rect x="880.0" y="1541" width="5.5" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="883.05" y="1551.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="1173.7" y="1813" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1176.69" y="1823.5" ></text>
+</g>
+<g >
+<title>__x64_sys_futex (60,606,060 samples, 2.76%)</title><rect x="967.1" y="1637" width="32.6" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="970.05" y="1647.5" >__..</text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1509" width="5.4" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="855.86" y="1519.5" ></text>
+</g>
+<g >
+<title>ip_local_out (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1365" width="10.9" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="834.11" y="1375.5" ></text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="1162.8" y="1605" width="5.4" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="1165.81" y="1615.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1733" width="10.9" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="1165.81" y="1743.5" ></text>
+</g>
+<g >
+<title>security_file_permission (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1477" width="5.5" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="796.04" y="1487.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (80,808,080 samples, 3.69%)</title><rect x="684.3" y="1029" width="43.5" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="687.29" y="1039.5" >[kub..</text>
+</g>
+<g >
+<title>schedule (111,111,110 samples, 5.07%)</title><rect x="1070.4" y="1557" width="59.8" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="1073.37" y="1567.5" >schedule</text>
+</g>
+<g >
+<title>security_file_permission (10,101,010 samples, 0.46%)</title><rect x="1037.7" y="1573" width="5.5" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1040.74" y="1583.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (484,848,480 samples, 22.12%)</title><rect x="586.4" y="1637" width="261.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="589.41" y="1647.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="581" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="591.5" >[..</text>
+</g>
+<g >
+<title>do_epoll_wait (10,101,010 samples, 0.46%)</title><rect x="1135.6" y="1637" width="5.5" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1138.62" y="1647.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="661" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="671.5" >[..</text>
+</g>
+<g >
+<title>vfs_write (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1525" width="27.2" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="801.48" y="1535.5" >v..</text>
+</g>
+<g >
+<title>__skb_datagram_iter (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1365" width="5.4" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="774.29" y="1375.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1621" width="21.7" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="828.67" y="1631.5" >e..</text>
+</g>
+<g >
+<title>do_syscall_64 (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1605" width="21.7" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="828.67" y="1615.5" >d..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="549" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="559.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (141,414,140 samples, 6.45%)</title><rect x="651.7" y="1365" width="76.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="654.66" y="1375.5" >[kube-ap..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (10,101,010 samples, 0.46%)</title><rect x="711.5" y="149" width="5.4" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="714.47" y="159.5" ></text>
+</g>
+<g >
+<title>sock_recvmsg (20,202,020 samples, 0.92%)</title><rect x="771.3" y="1445" width="10.9" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="774.29" y="1455.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1701" width="10.9" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1165.81" y="1711.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (10,101,010 samples, 0.46%)</title><rect x="716.9" y="309" width="5.5" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="719.91" y="319.5" ></text>
+</g>
+<g >
+<title>do_softirq (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1237" width="10.9" height="15.0" fill="rgb(223,87,20)" rx="2" ry="2" />
+<text  x="834.11" y="1247.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (262,626,260 samples, 11.98%)</title><rect x="619.0" y="1477" width="141.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="622.03" y="1487.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>skb_copy_datagram_iter (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1381" width="5.4" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="774.29" y="1391.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (1,656,565,640 samples, 75.58%)</title><rect x="265.6" y="1733" width="891.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="268.58" y="1743.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>tcp_push (30,303,030 samples, 1.38%)</title><rect x="825.7" y="1461" width="16.3" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="828.67" y="1471.5" ></text>
+</g>
+<g >
+<title>futex_wait (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1653" width="10.9" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="1165.81" y="1663.5" ></text>
+</g>
+<g >
+<title>__futex_wait (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1637" width="10.9" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="1165.81" y="1647.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1685" width="5.4" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="904.80" y="1695.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="613" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="623.5" >[..</text>
+</g>
+<g >
+<title>do_futex (10,101,010 samples, 0.46%)</title><rect x="765.9" y="1493" width="5.4" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="768.85" y="1503.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (50,505,050 samples, 2.30%)</title><rect x="874.6" y="1669" width="27.2" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="877.61" y="1679.5" >e..</text>
+</g>
+<g >
+<title>handle_softirqs (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1205" width="10.9" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="834.11" y="1215.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="1173.7" y="1861" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1176.69" y="1871.5" ></text>
+</g>
+<g >
+<title>do_epoll_pwait.part.0 (161,616,160 samples, 7.37%)</title><rect x="1048.6" y="1637" width="87.0" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="1051.62" y="1647.5" >do_epoll_p..</text>
+</g>
+<g >
+<title>do_epoll_pwait.part.0 (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1381" width="32.6" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="730.79" y="1391.5" >do..</text>
+</g>
+<g >
+<title>rw_verify_area (10,101,010 samples, 0.46%)</title><rect x="1037.7" y="1589" width="5.5" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="1040.74" y="1599.5" ></text>
+</g>
+<g >
+<title>ep_poll (60,606,060 samples, 2.76%)</title><rect x="934.4" y="1589" width="32.7" height="15.0" fill="rgb(238,151,36)" rx="2" ry="2" />
+<text  x="937.42" y="1599.5" >ep..</text>
+</g>
+<g >
+<title>page_counter_try_charge (10,101,010 samples, 0.46%)</title><rect x="820.2" y="885" width="5.5" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="823.23" y="895.5" ></text>
+</g>
+<g >
+<title>do_futex (20,202,020 samples, 0.92%)</title><rect x="1162.8" y="1669" width="10.9" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="1165.81" y="1679.5" ></text>
+</g>
+<g >
+<title>schedule (30,303,030 samples, 1.38%)</title><rect x="972.5" y="1557" width="16.3" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="975.49" y="1567.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1157" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1167.5" >[kube..</text>
+</g>
+<g >
+<title>ip_local_deliver_finish (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1077" width="10.9" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="834.11" y="1087.5" ></text>
+</g>
+<g >
+<title>tcp_stream_alloc_skb (10,101,010 samples, 0.46%)</title><rect x="842.0" y="1461" width="5.4" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="844.98" y="1471.5" ></text>
+</g>
+<g >
+<title>__x64_sys_write (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1557" width="27.2" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="801.48" y="1567.5" >_..</text>
+</g>
+<g >
+<title>skb_copy_datagram_iter (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1381" width="5.5" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="779.73" y="1391.5" ></text>
+</g>
+<g >
+<title>check_heap_object (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1301" width="5.5" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="779.73" y="1311.5" ></text>
+</g>
+<g >
+<title>__schedule (10,101,010 samples, 0.46%)</title><rect x="1162.8" y="1589" width="5.4" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="1165.81" y="1599.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1525" width="5.4" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="855.86" y="1535.5" ></text>
+</g>
+<g >
+<title>__x64_sys_epoll_pwait (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1397" width="32.6" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="730.79" y="1407.5" >__..</text>
+</g>
+<g >
+<title>__fdget (20,202,020 samples, 0.92%)</title><rect x="1048.6" y="1605" width="10.9" height="15.0" fill="rgb(214,41,10)" rx="2" ry="2" />
+<text  x="1051.62" y="1615.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1589" width="5.5" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="796.04" y="1599.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (141,414,140 samples, 6.45%)</title><rect x="651.7" y="1429" width="76.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="654.66" y="1439.5" >[kube-ap..</text>
+</g>
+<g >
+<title>ep_poll (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1557" width="5.4" height="15.0" fill="rgb(238,151,36)" rx="2" ry="2" />
+<text  x="855.86" y="1567.5" ></text>
+</g>
+<g >
+<title>__x64_sys_epoll_pwait (10,101,010 samples, 0.46%)</title><rect x="852.9" y="1605" width="5.4" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="855.86" y="1615.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (40,404,040 samples, 1.84%)</title><rect x="706.0" y="405" width="21.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="415.5" >[..</text>
+</g>
+<g >
+<title>process_backlog (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1141" width="5.5" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="823.23" y="1151.5" ></text>
+</g>
+<g >
+<title>__tcp_transmit_skb (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1397" width="21.8" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="806.92" y="1407.5" >_..</text>
+</g>
+<g >
+<title>run_rebalance_domains (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1461" width="5.4" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="785.17" y="1471.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (838,383,830 samples, 38.25%)</title><rect x="450.5" y="1685" width="451.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="453.46" y="1695.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>inet6_csk_xmit (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1349" width="5.4" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="790.60" y="1359.5" ></text>
+</g>
+<g >
+<title>__do_softirq (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1221" width="10.9" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="834.11" y="1231.5" ></text>
+</g>
+<g >
+<title>syscall_trace_enter (20,202,020 samples, 0.92%)</title><rect x="912.7" y="1653" width="10.8" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="915.67" y="1663.5" ></text>
+</g>
+<g >
+<title>__x64_sys_epoll_pwait (10,101,010 samples, 0.46%)</title><rect x="722.4" y="309" width="5.4" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="725.35" y="319.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (30,303,030 samples, 1.38%)</title><rect x="885.5" y="1557" width="16.3" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="888.48" y="1567.5" ></text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="716.9" y="213" width="5.5" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="719.91" y="223.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (121,212,120 samples, 5.53%)</title><rect x="662.5" y="1269" width="65.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="665.53" y="1279.5" >[kube-a..</text>
+</g>
+<g >
+<title>__x64_sys_futex (50,505,050 samples, 2.30%)</title><rect x="874.6" y="1621" width="27.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="877.61" y="1631.5" >_..</text>
+</g>
+<g >
+<title>ip_finish_output (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1333" width="10.9" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="834.11" y="1343.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="709" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="719.5" >[..</text>
+</g>
+<g >
+<title>x64_sys_call (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1573" width="27.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="801.48" y="1583.5" >x..</text>
+</g>
+<g >
+<title>vfs_read (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1637" width="5.5" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="1154.94" y="1647.5" ></text>
+</g>
+<g >
+<title>try_charge_memcg (10,101,010 samples, 0.46%)</title><rect x="842.0" y="1413" width="5.4" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="844.98" y="1423.5" ></text>
+</g>
+<g >
+<title>do_futex (10,101,010 samples, 0.46%)</title><rect x="858.3" y="1589" width="5.4" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="861.29" y="1599.5" ></text>
+</g>
+<g >
+<title>tcp_v4_rcv (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1045" width="10.9" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="834.11" y="1055.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1077" width="5.5" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="823.23" y="1087.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (10,101,010 samples, 0.46%)</title><rect x="760.4" y="1541" width="5.5" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="763.41" y="1551.5" ></text>
+</g>
+<g >
+<title>rw_verify_area (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1493" width="5.5" height="15.0" fill="rgb(218,64,15)" rx="2" ry="2" />
+<text  x="796.04" y="1503.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="789" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="799.5" >[k..</text>
+</g>
+<g >
+<title>schedule (50,505,050 samples, 2.30%)</title><rect x="939.9" y="1541" width="27.2" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="942.86" y="1551.5" >s..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="853" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="863.5" >[k..</text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (50,505,050 samples, 2.30%)</title><rect x="798.5" y="1605" width="27.2" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="801.48" y="1615.5" >e..</text>
+</g>
+<g >
+<title>__check_object_size (10,101,010 samples, 0.46%)</title><rect x="776.7" y="1333" width="5.5" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="779.73" y="1343.5" ></text>
+</g>
+<g >
+<title>ep_poll (131,313,130 samples, 5.99%)</title><rect x="1059.5" y="1605" width="70.7" height="15.0" fill="rgb(238,151,36)" rx="2" ry="2" />
+<text  x="1062.49" y="1615.5" >ep_poll</text>
+</g>
+<g >
+<title>do_epoll_wait (151,515,150 samples, 6.91%)</title><rect x="1048.6" y="1621" width="81.6" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1051.62" y="1631.5" >do_epoll_..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="485" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="495.5" >[..</text>
+</g>
+<g >
+<title>__futex_wait (20,202,020 samples, 0.92%)</title><rect x="874.6" y="1573" width="10.9" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="877.61" y="1583.5" ></text>
+</g>
+<g >
+<title>__futex_wait (30,303,030 samples, 1.38%)</title><rect x="972.5" y="1589" width="16.3" height="15.0" fill="rgb(207,12,3)" rx="2" ry="2" />
+<text  x="975.49" y="1599.5" ></text>
+</g>
+<g >
+<title>do_epoll_ctl (10,101,010 samples, 0.46%)</title><rect x="869.2" y="1605" width="5.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="872.17" y="1615.5" ></text>
+</g>
+<g >
+<title>__secure_computing (10,101,010 samples, 0.46%)</title><rect x="847.4" y="1621" width="5.5" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="850.42" y="1631.5" ></text>
+</g>
+<g >
+<title>tcp_recvmsg_locked (10,101,010 samples, 0.46%)</title><rect x="771.3" y="1397" width="5.4" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="774.29" y="1407.5" ></text>
+</g>
+<g >
+<title>[[vdso]] (10,101,010 samples, 0.46%)</title><rect x="591.8" y="1605" width="5.5" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="594.84" y="1615.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (60,606,060 samples, 2.76%)</title><rect x="727.8" y="1429" width="32.6" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="730.79" y="1439.5" >do..</text>
+</g>
+<g >
+<title>__x64_sys_write (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1573" width="21.7" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="828.67" y="1583.5" >_..</text>
+</g>
+<g >
+<title>[kube-apiserver] (60,606,060 samples, 2.76%)</title><rect x="695.2" y="869" width="32.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="698.16" y="879.5" >[k..</text>
+</g>
+<g >
+<title>__release_sock (10,101,010 samples, 0.46%)</title><rect x="798.5" y="1445" width="5.4" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="801.48" y="1455.5" ></text>
+</g>
+<g >
+<title>ip_rcv (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1093" width="5.5" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="823.23" y="1103.5" ></text>
+</g>
+<g >
+<title>x64_sys_call (181,818,180 samples, 8.29%)</title><rect x="1048.6" y="1669" width="97.9" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="1051.62" y="1679.5" >x64_sys_call</text>
+</g>
+<g >
+<title>schedule (10,101,010 samples, 0.46%)</title><rect x="1168.2" y="1621" width="5.5" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="1171.25" y="1631.5" ></text>
+</g>
+<g >
+<title>refill_stock (10,101,010 samples, 0.46%)</title><rect x="842.0" y="1397" width="5.4" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="844.98" y="1407.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range (60,606,060 samples, 2.76%)</title><rect x="934.4" y="1573" width="32.7" height="15.0" fill="rgb(221,75,18)" rx="2" ry="2" />
+<text  x="937.42" y="1583.5" >sc..</text>
+</g>
+<g >
+<title>__x64_sys_futex (10,101,010 samples, 0.46%)</title><rect x="858.3" y="1605" width="5.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="861.29" y="1615.5" ></text>
+</g>
+<g >
+<title>__vdso_clock_gettime (10,101,010 samples, 0.46%)</title><rect x="1157.4" y="1733" width="5.4" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="1160.37" y="1743.5" ></text>
+</g>
+<g >
+<title>ip_output (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1333" width="5.5" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="823.23" y="1343.5" ></text>
+</g>
+<g >
+<title>__fdget (20,202,020 samples, 0.92%)</title><rect x="923.5" y="1589" width="10.9" height="15.0" fill="rgb(214,41,10)" rx="2" ry="2" />
+<text  x="926.55" y="1599.5" ></text>
+</g>
+<g >
+<title>__local_bh_enable_ip (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1253" width="10.9" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="834.11" y="1263.5" ></text>
+</g>
+<g >
+<title>do_futex (10,101,010 samples, 0.46%)</title><rect x="711.5" y="85" width="5.4" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="714.47" y="95.5" ></text>
+</g>
+<g >
+<title>futex_wake (10,101,010 samples, 0.46%)</title><rect x="858.3" y="1573" width="5.4" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="861.29" y="1583.5" ></text>
+</g>
+<g >
+<title>ksys_write (40,404,040 samples, 1.84%)</title><rect x="825.7" y="1557" width="21.7" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="828.67" y="1567.5" >k..</text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="1173.7" y="1797" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="1176.69" y="1807.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1253" width="5.4" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="747.10" y="1263.5" ></text>
+</g>
+<g >
+<title>schedule (50,505,050 samples, 2.30%)</title><rect x="727.8" y="1301" width="27.2" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="730.79" y="1311.5" >s..</text>
+</g>
+<g >
+<title>[kube-apiserver] (20,202,020 samples, 0.92%)</title><rect x="706.0" y="293" width="10.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="709.04" y="303.5" ></text>
+</g>
+<g >
+<title>security_file_permission (10,101,010 samples, 0.46%)</title><rect x="1151.9" y="1605" width="5.5" height="15.0" fill="rgb(225,96,23)" rx="2" ry="2" />
+<text  x="1154.94" y="1615.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="533" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="543.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="565" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="575.5" >[..</text>
+</g>
+<g >
+<title>[kube-apiserver] (90,909,090 samples, 4.15%)</title><rect x="678.8" y="1061" width="49.0" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="681.85" y="1071.5" >[kub..</text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="677" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="687.5" >[..</text>
+</g>
+<g >
+<title>update_blocked_averages (10,101,010 samples, 0.46%)</title><rect x="782.2" y="1445" width="5.4" height="15.0" fill="rgb(240,163,38)" rx="2" ry="2" />
+<text  x="785.17" y="1455.5" ></text>
+</g>
+<g >
+<title>entry_SYSCALL_64_after_hwframe (10,101,010 samples, 0.46%)</title><rect x="722.4" y="357" width="5.4" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="725.35" y="367.5" ></text>
+</g>
+<g >
+<title>finish_task_switch.isra.0 (50,505,050 samples, 2.30%)</title><rect x="939.9" y="1509" width="27.2" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="942.86" y="1519.5" >f..</text>
+</g>
+<g >
+<title>ip_protocol_deliver_rcu (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1061" width="10.9" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="834.11" y="1071.5" ></text>
+</g>
+<g >
+<title>ip_local_deliver_finish (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1061" width="5.5" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="823.23" y="1071.5" ></text>
+</g>
+<g >
+<title>ip_rcv (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1109" width="10.9" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="834.11" y="1119.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (242,424,240 samples, 11.06%)</title><rect x="629.9" y="1461" width="130.5" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="632.91" y="1471.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>__ip_finish_output (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1301" width="5.5" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="823.23" y="1311.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="933" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="943.5" >[ku..</text>
+</g>
+<g >
+<title>wake_up_q (10,101,010 samples, 0.46%)</title><rect x="711.5" y="53" width="5.4" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="714.47" y="63.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (50,505,050 samples, 2.30%)</title><rect x="700.6" y="437" width="27.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="703.60" y="447.5" >[..</text>
+</g>
+<g >
+<title>sysvec_hyperv_stimer0 (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1493" width="5.5" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="866.73" y="1503.5" ></text>
+</g>
+<g >
+<title>tcp_sendmsg_locked (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1429" width="5.4" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="790.60" y="1439.5" ></text>
+</g>
+<g >
+<title>nft_do_chain_ipv4 (10,101,010 samples, 0.46%)</title><rect x="803.9" y="1301" width="5.5" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="806.92" y="1311.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (121,212,120 samples, 5.53%)</title><rect x="662.5" y="1253" width="65.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="665.53" y="1263.5" >[kube-a..</text>
+</g>
+<g >
+<title>__dev_queue_xmit (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1269" width="10.9" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="834.11" y="1279.5" ></text>
+</g>
+<g >
+<title>ip_finish_output2 (20,202,020 samples, 0.92%)</title><rect x="831.1" y="1301" width="10.9" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="834.11" y="1311.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (70,707,070 samples, 3.23%)</title><rect x="689.7" y="965" width="38.1" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="692.72" y="975.5" >[ku..</text>
+</g>
+<g >
+<title>__x64_sys_write (80,808,080 samples, 3.69%)</title><rect x="999.7" y="1637" width="43.5" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="1002.68" y="1647.5" >__x6..</text>
+</g>
+<g >
+<title>[kube-apiserver] (1,969,696,950 samples, 89.86%)</title><rect x="113.3" y="1813" width="1060.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="116.32" y="1823.5" >[kube-apiserver]</text>
+</g>
+<g >
+<title>do_syscall_64 (20,202,020 samples, 0.92%)</title><rect x="1146.5" y="1701" width="10.9" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="1149.50" y="1711.5" ></text>
+</g>
+<g >
+<title>do_syscall_64 (10,101,010 samples, 0.46%)</title><rect x="760.4" y="1525" width="5.5" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="763.41" y="1535.5" ></text>
+</g>
+<g >
+<title>tcp_write_xmit (30,303,030 samples, 1.38%)</title><rect x="825.7" y="1429" width="16.3" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="828.67" y="1439.5" ></text>
+</g>
+<g >
+<title>run_rebalance_domains (10,101,010 samples, 0.46%)</title><rect x="863.7" y="1429" width="5.5" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="866.73" y="1439.5" ></text>
+</g>
+<g >
+<title>hrtimer_start_range_ns (10,101,010 samples, 0.46%)</title><rect x="934.4" y="1541" width="5.5" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="937.42" y="1551.5" ></text>
+</g>
+<g >
+<title>tcp_push (10,101,010 samples, 0.46%)</title><rect x="787.6" y="1413" width="5.4" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="790.60" y="1423.5" ></text>
+</g>
+<g >
+<title>ip_local_out (40,404,040 samples, 1.84%)</title><rect x="803.9" y="1349" width="21.8" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="806.92" y="1359.5" >i..</text>
+</g>
+<g >
+<title>vfs_read (10,101,010 samples, 0.46%)</title><rect x="793.0" y="1509" width="5.5" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="796.04" y="1519.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (50,505,050 samples, 2.30%)</title><rect x="727.8" y="1317" width="27.2" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="730.79" y="1327.5" >s..</text>
+</g>
+<g >
+<title>[kube-apiserver] (111,111,110 samples, 5.07%)</title><rect x="668.0" y="1205" width="59.8" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="670.97" y="1215.5" >[kube-..</text>
+</g>
+<g >
+<title>task_mm_cid_work (10,101,010 samples, 0.46%)</title><rect x="901.8" y="1605" width="5.4" height="15.0" fill="rgb(226,101,24)" rx="2" ry="2" />
+<text  x="904.80" y="1615.5" ></text>
+</g>
+<g >
+<title>wake_up_q (20,202,020 samples, 0.92%)</title><rect x="988.8" y="1589" width="10.9" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="991.80" y="1599.5" ></text>
+</g>
+<g >
+<title>__do_softirq (10,101,010 samples, 0.46%)</title><rect x="820.2" y="1205" width="5.5" height="15.0" fill="rgb(246,191,45)" rx="2" ry="2" />
+<text  x="823.23" y="1215.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (10,101,010 samples, 0.46%)</title><rect x="744.1" y="1189" width="5.4" height="15.0" fill="rgb(238,156,37)" rx="2" ry="2" />
+<text  x="747.10" y="1199.5" ></text>
+</g>
+<g >
+<title>[kube-apiserver] (101,010,100 samples, 4.61%)</title><rect x="673.4" y="1077" width="54.4" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="676.41" y="1087.5" >[kube..</text>
+</g>
+<g >
+<title>ktime_get_ts64 (10,101,010 samples, 0.46%)</title><rect x="722.4" y="293" width="5.4" height="15.0" fill="rgb(216,53,12)" rx="2" ry="2" />
+<text  x="725.35" y="303.5" ></text>
+</g>
+<g >
+<title>schedule_hrtimeout_range_clock (131,313,130 samples, 5.99%)</title><rect x="1059.5" y="1573" width="70.7" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1062.49" y="1583.5" >schedul..</text>
+</g>
+<g >
+<title>[kube-apiserver] (121,212,120 samples, 5.53%)</title><rect x="662.5" y="1237" width="65.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="665.53" y="1247.5" >[kube-a..</text>
+</g>
+<g >
+<title>[kube-apiserver] (1,767,676,750 samples, 80.65%)</title><rect x="222.1" y="1765" width="951.6" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="225.07" y="1775.5" >[kube-apiserver]</text>
+</g>
+</g>
+</svg>
